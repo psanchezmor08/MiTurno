@@ -9,12 +9,20 @@ services:
     restart: unless-stopped
 
   app:
-    build: .
+    image: python:3.11-slim
     container_name: miturno_app
     ports:
       - "8505:8505"
     environment:
       - OLLAMA_HOST=http://ollama:11434
+    volumes:
+      # Mapeamos la carpeta donde está tu archivo MiTurno.py
+      - /home/miturno:/app
+    working_dir: /app
+    # El comando instala las librerías necesarias y arranca tu programa MiTurno.py
+    command: >
+      sh -c "pip install streamlit pandas langchain_community requests && 
+             streamlit run MiTurno.py --server.port=8505 --server.address=0.0.0.0"
     depends_on:
       - ollama
     restart: unless-stopped
