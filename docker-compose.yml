@@ -15,14 +15,17 @@ services:
       - "8505:8505"
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+    # ESTO ES LO IMPORTANTE: 
+    # Mapea los archivos descargados de GitHub (./) al interior del contenedor (/app)
     volumes:
-      # Mapeamos la carpeta donde está tu archivo MiTurno.py
-      - /home/miturno:/app
+      - .:/app
     working_dir: /app
-    # El comando instala las librerías necesarias y arranca tu programa MiTurno.py
     command: >
-      sh -c "pip install streamlit pandas langchain_community requests && 
-             streamlit run MiTurno.py --server.port=8505 --server.address=0.0.0.0"
+      sh -c "
+      if [ -f requirements.txt ]; then pip install -r requirements.txt; 
+      else pip install streamlit pandas langchain_community requests; fi &&
+      streamlit run MiTurno.py --server.port=8505 --server.address=0.0.0.0 --server.headless=true"
     depends_on:
       - ollama
     restart: unless-stopped
