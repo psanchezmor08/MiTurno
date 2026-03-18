@@ -16,4 +16,4 @@ COPY app.py .
 EXPOSE 8505
 
 # Comando para arrancar Streamlit en el puerto 8505
-CMD ["streamlit", "run", "MiTurno.py", "--server.port=8505", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "miturno.py", "--server.port=8505", "--server.address=0.0.0.0"]
