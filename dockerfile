@@ -10,10 +10,9 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+# CORRECCIÓN: Copiamos el archivo correcto
+COPY miturno.py .
 
-# Exponemos el puerto solicitado
 EXPOSE 8505
 
-# Comando para arrancar Streamlit en el puerto 8505
 CMD ["streamlit", "run", "miturno.py", "--server.port=8505", "--server.address=0.0.0.0"]
