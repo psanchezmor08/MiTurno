@@ -71,7 +71,7 @@ def cargar_estilos_corporativos():
 cargar_estilos_corporativos()
 
 # --- 2. BASE DE DATOS (ESTADO) ---
-# Inicializamos los centros tal cual estaban en el código React
+# Inicializamos los centros tal cual estaban en el código React [cite: 35]
 if 'db' not in st.session_state:
     st.session_state.db = {
         'centers': [
@@ -90,7 +90,7 @@ if 'db' not in st.session_state:
     }
 
 # --- 3. LÓGICA DE TURNOS (TRADUCCIÓN DE LA BETA) ---
-# Definimos los tipos de turnos igual que en React
+# Definimos los tipos de turnos igual que en React [cite: 36, 55]
 SHIFT_TYPES = {
     'M': {'name': 'Mañana', 'color': '#fbbf24', 'hours': 7},
     'T': {'name': 'Tarde', 'color': '#f97316', 'hours': 7},
@@ -118,11 +118,11 @@ def solver_automatico(workers_ids, start_date):
     for w in workers_ids:
         for d in range(num_days):
             model.AddExactlyOne(x[w, d, s] for s in shifts)
-        # Regla: No Tarde(2) o Noche(3) antes de Mañana(1)
+        # Regla: No Tarde(2) o Noche(3) antes de Mañana(1) 
         for d in range(num_days - 1):
             model.AddImplication(x[w, d, 2], x[w, d+1, 1].Not())
             model.AddImplication(x[w, d, 3], x[w, d+1, 1].Not())
-        # Mínimo 2 días libres
+        # Mínimo 2 días libres 
         model.Add(sum(x[w, d, 0] for d in range(num_days)) >= 2)
 
     solver = cp_model.CpSolver()
@@ -153,4 +153,92 @@ if menu == "🏠 Inicio":
     with c1:
         st.markdown(f'<div class="glass-card"><h3>{len(st.session_state.db["centers"])}</h3><p>Sedes Activas</p></div>', unsafe_allow_html=True)
     with c2:
-        st.markdown(f'<div class="glass-card"><h3>{len(st.session_state.db["workers"])}</h3><p>Personal</p></div>', unsafe_allow
+        st.markdown(f'<div class="glass-card"><h3>{len(st.session_state.db["workers"])}</h3><p>Personal</p></div>', unsafe_allow_html=True)
+    with c3:
+        st.markdown(f'<div class="glass-card"><h3>{len(st.session_state.db["shifts"])}</h3><p>Turnos Asignados</p></div>', unsafe_allow_html=True)
+
+elif menu == "🏢 Sedes":
+    st.title("Gestión de Sedes")
+    with st.expander("➕ Añadir Nueva Sede"):
+        name = st.text_input("Nombre del Centro/Museo")
+        if st.button("Guardar Sede"):
+            new_id = str(len(st.session_state.db['centers']) + 1)
+            st.session_state.db['centers'].append({'id': new_id, 'name': name})
+            st.success("Sede añadida correctamente.")
+    
+    st.write("### Listado de Centros")
+    df_centers = pd.DataFrame(st.session_state.db['centers'])
+    st.table(df_centers)
+
+elif menu == "👥 Trabajadores":
+    st.title("Personal de Centros")
+    with st.form("new_worker"):
+        col1, col2 = st.columns(2)
+        name = col1.text_input("Nombre")
+        surname = col2.text_input("Apellidos")
+        center = st.selectbox("Sede Asignada", [c['name'] for c in st.session_state.db['centers']])
+        role = st.selectbox("Rol", ["WORKER", "EDITOR", "ADMIN"])
+        if st.form_submit_button("Registrar Trabajador"):
+            c_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == center)
+            new_w = {'id': f'w{len(st.session_state.db["workers"])+1}', 'name': name, 'surname': surname, 'center_id': c_id, 'role': role}
+            st.session_state.db['workers'].append(new_w)
+            st.success("Trabajador registrado.")
+            
+    st.write("### Plantilla")
+    st.dataframe(pd.DataFrame(st.session_state.db['workers']), use_container_width=True)
+
+elif menu == "🗓️ Cuadrante Mensual":
+    st.title("Cuadrante de Turnos")
+    center_sel = st.selectbox("Filtrar por Sede", [c['name'] for c in st.session_state.db['centers']])
+    c_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == center_sel)
+    
+    # Filtrar trabajadores y sus turnos
+    workers_sede = [w for w in st.session_state.db['workers'] if w['center_id'] == c_id]
+    
+    if not workers_sede:
+        st.warning("No hay trabajadores en esta sede.")
+    else:
+        # Replicamos la tabla del RosterView de React 
+        hoy = datetime.now()
+        mes = hoy.month
+        anio = hoy.year
+        num_dias = calendar.monthrange(anio, mes)[1]
+        
+        data_roster = {}
+        for w in workers_sede:
+            nombre_full = f"{w['name']} {w['surname']}"
+            data_roster[nombre_full] = [""] * num_dias
+            for s in st.session_state.db['shifts']:
+                if s['worker_id'] == w['id']:
+                    d_idx = int(s['date'].split("-")[2]) - 1
+                    if d_idx < num_dias:
+                        data_roster[nombre_full][d_idx] = s['type']
+        
+        df_roster = pd.DataFrame(data_roster).T
+        df_roster.columns = [str(i+1) for i in range(num_dias)]
+        
+        def color_roster(val):
+            color = SHIFT_TYPES.get(val, {}).get('color', 'white')
+            text_color = 'white' if val in ['N', 'T', 'B', 'V'] else 'black'
+            return f'background-color: {color}; color: {text_color}; text-align: center; font-weight: bold'
+
+        st.dataframe(df_roster.style.applymap(color_roster), use_container_width=True)
+
+elif menu == "🤖 Generador IA":
+    st.title("Generador Automático de Horarios")
+    st.info("Esta sección utiliza el motor lógico para rellenar los turnos vacíos cumpliendo todas las normativas.")
+    
+    sede_gen = st.selectbox("Seleccionar Sede para Generar", [c['name'] for c in st.session_state.db['centers']])
+    fecha_inicio = st.date_input("Fecha de inicio (Lunes)", value=datetime.now())
+    
+    if st.button("🚀 Iniciar Generación de Turnos"):
+        c_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == sede_gen)
+        w_ids = [w['id'] for w in st.session_state.db['workers'] if w['center_id'] == c_id]
+        
+        with st.spinner("Calculando cuadrante óptimo..."):
+            nuevos_turnos = solver_automatico(w_ids, fecha_inicio)
+            if nuevos_turnos:
+                st.session_state.db['shifts'].extend(nuevos_turnos)
+                st.success(f"¡Generados {len(nuevos_turnos)} turnos con éxito!")
+            else:
+                st.error("No se pudo encontrar una solución válida con el personal actual.")
