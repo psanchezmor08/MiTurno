@@ -1,157 +1,173 @@
 import streamlit as st
+from PIL import Image
 import pandas as pd
-from ortools.sat.python import cp_model
-import json
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="MiTurno Pro", page_icon="🗓️", layout="wide")
+# --- 1. CONFIGURACIÓN DE LA PÁGINA ---
+# Es vital que esto sea lo primero. Define el título de la pestaña y el layout ancho.
+st.set_page_config(
+    page_title="Aplicación Corporativa - Junta de Andalucía",
+    page_icon="🟢", # Puedes poner aquí un icono .ico o un emoji
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# --- INTEGRACIÓN DE TU CSS (Pema) ---
-st.markdown("""
+# --- 2. INYECCIÓN DE CSS CORPORATIVO (Estilo Junta) ---
+# Esta función "engaña" a Streamlit para que use tus estilos en lugar de los suyos.
+# He adaptado los estilos verdes y la tipografía Roboto para que funcionen aquí.
+def cargar_estilos_junta():
+    estilo_css = """
     <style>
-    /* Estilos base de la app */
-    .main { background-color: #f8fafc; }
-    .stDataFrame { border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); background-color: white;}
-    
-    /* === TU CSS ADAPTADO (Sin fotos) === */
-    section[data-testid="stSidebar"] {
-        background-color: #007a33;
-    }
-    section[data-testid="stSidebar"] [role="radiogroup"] input {
-        display: none !important;
-    }
-    section[data-testid="stSidebar"] [role="radiogroup"] > label {
-        display: flex !important;
-        align-items: center;
-        justify-content: center;
-        padding: 10px 16px;
-        margin: 6px 10px;
-        border-radius: 8px;
-        cursor: pointer;
-        background-color: transparent;
-        color: white !important;
-        border: 1px solid transparent;
-        font-weight: 500;
-        text-align: center;
-        transition: all 0.2s ease;
-    }
-    section[data-testid="stSidebar"] [role="radiogroup"] > label:hover {
-        background-color: rgba(255, 255, 255, 0.2);
-    }
-    section[data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) {
-        background-color: #ffffff !important;
-        color: #007a33 !important;
-    }
+        /* Importamos la fuente Roboto oficial de Google Fonts */
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+
+        :root {
+            --verde-junta: #007a33;        /* Color principal */
+            --verde-junta-claro: #e6f2eb;  /* Fondos claros */
+            --verde-junta-oscuro: #005f27; /* Hover de botones */
+            --texto-gris: #333333;
+        }
+
+        /* Aplicar tipografía global */
+        html, body, [class*="css"] {
+            font-family: 'Roboto', sans-serif;
+            color: var(--texto-gris);
+        }
+
+        /* --- PERSONALIZACIÓN DE TÍTULOS --- */
+        h1, h2, h3 {
+            color: var(--verde-junta) !important;
+            font-weight: 700;
+        }
+
+        /* --- PERSONALIZACIÓN DE LA BARRA LATERAL (Sidebar) --- */
+        [data-testid="stSidebar"] {
+            background-color: var(--verde-junta-claro);
+            border-right: 1px solid #d1e7dd;
+        }
+        /* Estilo para los radio buttons del menú lateral */
+        [data-testid="stSidebar"] [role="radiogroup"] label {
+            background-color: white;
+            border: 1px solid #d1e7dd;
+            margin-bottom: 5px;
+            border-radius: 4px;
+            padding: 10px;
+            transition: all 0.3s;
+        }
+        [data-testid="stSidebar"] [role="radiogroup"] label[data-checked="true"] {
+            background-color: var(--verde-junta) !important;
+            color: white !important;
+            font-weight: 500;
+            border-color: var(--verde-junta);
+        }
+
+        /* --- PERSONALIZACIÓN DE BOTONES PRINCIPALES --- */
+        /* Apuntamos a los botones de Streamlit para hacerlos verdes */
+        .stButton > button {
+            background-color: var(--verde-junta) !important;
+            color: white !important;
+            border: none;
+            border-radius: 4px;
+            padding: 0.6rem 1.2rem;
+            font-weight: 500;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: background-color 0.3s ease;
+        }
+        .stButton > button:hover {
+            background-color: var(--verde-junta-oscuro) !important;
+             box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        
+        /* Botones secundarios (tipo 'outline' si los necesitaras) */
+        button[kind="secondary"] {
+             background-color: transparent !important;
+             color: var(--verde-junta) !important;
+             border: 2px solid var(--verde-junta) !important;
+        }
+
+        /* --- PERSONALIZACIÓN DE INPUTS (Campos de texto) --- */
+        /* Cuando haces clic en un input, el borde se pone verde */
+        [data-baseweb="input"]:focus-within {
+            border-color: var(--verde-junta) !important;
+            box-shadow: 0 0 0 1px var(--verde-junta) !important;
+        }
+
+        /* --- ESTILO DE TABLAS/DATAFRAMES --- */
+        [data-testid="stDataFrame"] {
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        /* Cabecera de la tabla en verde claro */
+        [data-testid="stDataFrame"] thead th {
+            background-color: var(--verde-junta-claro) !important;
+            color: var(--verde-junta) !important;
+            font-weight: 700 !important;
+        }
+
+        /* Eliminar el menú hamburguesa y el footer de "Made with Streamlit" para que sea más limpio */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
     </style>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(estilo_css, unsafe_allow_html=True)
 
-# --- MOTOR MATEMÁTICO DINÁMICO ---
-def generar_cuadrante(lista_empleados, dias_libres_req, prohibir_tarde_manana, reglas_json):
-    model = cp_model.CpModel()
-    num_dias = 7
-    dias = range(num_dias)
-    turnos = [0, 1, 2] # 0: Libre, 1: Mañana, 2: Tarde
-    nombres_turnos = {0: 'L', 1: 'M', 2: 'T'}
-    
-    shifts = {}
-    for emp in lista_empleados:
-        for d in dias:
-            for t in turnos:
-                shifts[(emp, d, t)] = model.NewBoolVar(f'shift_{emp}_d{d}_t{t}')
-                
-    for emp in lista_empleados:
-        # Regla 1: Un solo estado por día
-        for d in dias:
-            model.AddExactlyOne(shifts[(emp, d, t)] for t in turnos)
-            
-        # Regla 2: Días libres dinámicos
-        model.Add(sum(shifts[(emp, d, 0)] for d in dias) == dias_libres_req)
+# Ejecutamos la función para cargar el CSS
+cargar_estilos_junta()
+
+
+# --- 3. ESTRUCTURA DE LA APLICACIÓN (Ejemplo) ---
+
+# --- Barra Lateral (Sidebar) ---
+with st.sidebar:
+    # Aquí podrías poner el logo de la Junta
+    # st.image("ruta_al_logo_junta.png", width=200)
+    st.header("Navegación Principal")
+    menu_seleccionado = st.radio("Ir a:", ["Inicio / Dashboard", "Gestión de Datos", "Configuración"], label_visibility="collapsed")
+
+    st.markdown("---")
+    st.caption("© 2024 Junta de Andalucía. v1.0.0 (Python Edition)")
+
+# --- Área Principal ---
+if menu_seleccionado == "Inicio / Dashboard":
+    st.title("Bienvenido al Sistema")
+    st.markdown("Esta aplicación ha sido portada a **Python + Streamlit** manteniendo la identidad visual corporativa.")
+
+    # Creamos dos columnas para organizar el contenido
+    col_izq, col_der = st.columns([1, 2])
+
+    with col_izq:
+        st.subheader("Controles Rápidos")
+        # Ejemplo de inputs con el estilo aplicado
+        usuario = st.text_input("Identificador de usuario")
+        departamento = st.selectbox("Seleccione departamento", ["Consejería de Salud", "Educación", "Fomento"])
         
-        # Regla 3: Bloqueo Tarde -> Mañana dinámico
-        if prohibir_tarde_manana:
-            for d in range(num_dias - 1):
-                model.AddImplication(shifts[(emp, d, 2)], shifts[(emp, d + 1, 1)].Not())
-
-    # --- APLICAR REGLAS SUBIDAS POR JSON (Avanzado) ---
-    # Ejemplo formato JSON: {"Pedro": {"dias_libres_forzados": [0, 6]}} (0=Lunes, 6=Domingo)
-    if reglas_json:
-        try:
-            reglas = json.loads(reglas_json)
-            for emp, configs in reglas.items():
-                if emp in lista_empleados and "dias_libres_forzados" in configs:
-                    for d_libre in configs["dias_libres_forzados"]:
-                        if d_libre in dias:
-                            # Forzamos que ese día tenga el turno 0 (Libre)
-                            model.Add(shifts[(emp, d_libre, 0)] == 1)
-        except:
-            st.warning("El archivo JSON de reglas tiene un formato incorrecto y se ha ignorado.")
-
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 5.0 
-    status = solver.Solve(model)
-    
-    if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        resultado = {}
-        for emp in lista_empleados:
-            resultado[emp] = []
-            for d in dias:
-                for t in turnos:
-                    if solver.Value(shifts[(emp, d, t)]) == 1:
-                        resultado[emp].append(nombres_turnos[t])
-        return pd.DataFrame.from_dict(resultado, orient='index', columns=["Lun", "Mar", "Mie", "Jue", "Vie", "Sab", "Dom"])
-    else:
-        return None
-
-# --- INTERFAZ VISUAL LIMPIA ---
-st.title("🗓️ MiTurno")
-st.markdown("Generador de cuadrantes de alta precisión")
-
-# Dividimos la pantalla en pestañas para no saturar de información
-tab1, tab2 = st.tabs(["⚙️ Generador Principal", "📂 Subir Reglas Específicas"])
-
-with tab1:
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        st.subheader("Personal")
-        empleados_input = st.text_area("Lista de Empleados", "Juan, Maria, Pedro, Ana, Luis", height=150)
-        
-        st.subheader("Reglas Generales")
-        dias_libres = st.number_input("Días libres por semana", min_value=0, max_value=6, value=2)
-        evitar_tm = st.toggle("Prohibir Tarde seguido de Mañana", value=True)
-        
-    with col2:
-        st.subheader("Resultado")
-        if st.button("🚀 Calcular Cuadrante", use_container_width=True, type="primary"):
-            lista_empleados = [e.strip() for e in empleados_input.split(",") if e.strip()]
-            
-            if len(lista_empleados) < 2:
-                st.error("Añade al menos 2 empleados.")
+        st.write("") # Espacio
+        if st.button("Validar Acceso", use_container_width=True):
+            if usuario:
+                st.success(f"Acceso validado para: **{usuario}** ({departamento})")
             else:
-                with st.spinner("Motor matemático calculando..."):
-                    df = generar_cuadrante(lista_empleados, dias_libres, evitar_tm, None) # Pasamos None al JSON por ahora
-                    
-                    if df is not None:
-                        def style_cells(val):
-                            if val == 'M': color = '#dcfce7'
-                            elif val == 'T': color = '#fef9c3'
-                            elif val == 'L': color = '#fee2e2'
-                            else: color = '#f1f5f9'
-                            return f'background-color: {color}; color: black; text-align: center; font-weight: bold;'
+                st.warning("Por favor, introduzca un usuario.")
 
-                        st.dataframe(df.style.map(style_cells), use_container_width=True)
-                        st.download_button("📥 Descargar CSV", df.to_csv(), "cuadrante.csv", "text/csv")
-                        st.success("¡Cuadrante perfecto generado!")
-                    else:
-                        st.error("❌ Imposible generar el cuadrante. Demasiadas restricciones para tan pocos empleados.")
+    with col_der:
+        st.subheader("Vista General de Datos")
+        # Creamos un contenedor con estilo de tarjeta
+        with st.container():
+            st.info("Aquí se mostrará la información principal importada de la lógica de React.")
+            
+            # Ejemplo de tabla con datos ficticios para ver el estilo
+            datos_ejemplo = pd.DataFrame({
+                'ID Expediente': ['EXP-001', 'EXP-002', 'EXP-003', 'EXP-004'],
+                'Estado': ['En Trámite', 'Resuelto', 'Pendiente', 'En Trámite'],
+                'Fecha Entrada': ['2023-10-01', '2023-10-05', '2023-10-10', '2023-10-12'],
+                'Prioridad': ['Alta', 'Baja', 'Media', 'Alta']
+            })
+            st.dataframe(datos_ejemplo, use_container_width=True, hide_index=True)
 
-with tab2:
-    st.subheader("Reglas Excepcionales por Empleado")
-    st.info("Aquí puedes subir un archivo con peticiones especiales (Ej: Ana tiene vacaciones, Luis no puede los martes).")
-    archivo_subido = st.file_uploader("Sube tu archivo de reglas (.json)", type=["json"])
-    
-    if archivo_subido is not None:
-        reglas_texto = archivo_subido.getvalue().decode("utf-8")
-        st.text_area("Contenido del archivo:", reglas_texto, height=150, disabled=True)
-        st.success("Archivo cargado. Vuelve a la pestaña principal y dale a Calcular.")
-        # Nota para ti: En el botón de calcular habría que pasar 'reglas_texto' a la función generar_cuadrante en lugar de 'None'.
+elif menu_seleccionado == "Gestión de Datos":
+    st.title("Gestión de Expedientes")
+    st.write("Pantalla secundaria para la operativa diaria.")
+    # Aquí iría la lógica de negocio compleja
+
+elif menu_seleccionado == "Configuración":
+    st.title("Ajustes del Sistema")
+    st.write("Parámetros de configuración de la aplicación.")
