@@ -9,23 +9,16 @@ services:
     restart: unless-stopped
 
   app:
-    image: python:3.11-slim
+    # CORRECCIÓN: Le decimos que use el Dockerfile que está en la misma carpeta
+    build: .
     container_name: miturno_app
     ports:
       - "8505:8505"
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - PYTHONUNBUFFERED=1
-    # ESTO ES LO IMPORTANTE: 
-    # Mapea los archivos descargados de GitHub (./) al interior del contenedor (/app)
-    volumes:
-      - .:/app
-    working_dir: /app
-    command: >
-      sh -c "
-      if [ -f requirements.txt ]; then pip install -r requirements.txt; 
-      else pip install streamlit pandas langchain_community requests; fi &&
-      streamlit run miturno.py --server.port=8505 --server.address=0.0.0.0 --server.headless=true"
+    # CORRECCIÓN: Hemos eliminado el 'volumes: - .:/app' y el 'command' gigante.
+    # Tu Dockerfile ya se encarga de tener los archivos listos y ejecutar Streamlit.
     depends_on:
       - ollama
     restart: unless-stopped
