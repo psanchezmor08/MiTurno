@@ -6,6 +6,8 @@ services:
       - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
+    networks:
+      - miturno_net
     restart: unless-stopped
 
   mysql:
@@ -17,9 +19,17 @@ services:
       - MYSQL_USER=miturno_user
       - MYSQL_PASSWORD=miturno_pass
     ports:
-      - "3307:3307"
+      - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - miturno_net
     restart: unless-stopped
 
   phpmyadmin:
@@ -27,13 +37,16 @@ services:
     container_name: miturno_phpmyadmin
     environment:
       - PMA_HOST=mysql
-      - PMA_PORT=3307
+      - PMA_PORT=3306
       - PMA_USER=root
       - PMA_PASSWORD=root123
     ports:
       - "8081:80"
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
+    networks:
+      - miturno_net
     restart: unless-stopped
 
   app:
@@ -48,17 +61,25 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - PYTHONUNBUFFERED=1
       - MYSQL_HOST=mysql
-      - MYSQL_PORT=3307
+      - MYSQL_PORT=3306
       - MYSQL_DATABASE=miturno
       - MYSQL_USER=miturno_user
       - MYSQL_PASSWORD=miturno_pass
     # CORRECCIÓN: Hemos eliminado el 'volumes: - .:/app' y el 'command' gigante.
     # Tu Dockerfile ya se encarga de tener los archivos listos y ejecutar Streamlit.
     depends_on:
-      - ollama
-      - mysql
+      ollama:
+        condition: service_started
+      mysql:
+        condition: service_healthy
+    networks:
+      - miturno_net
     restart: unless-stopped
 
 volumes:
   ollama_data:
   mysql_data:
+
+networks:
+  miturno_net:
+    driver: bridge
