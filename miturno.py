@@ -256,7 +256,7 @@ def verify_center_requirements(center_id, week_start=None):
         'Detalle': f"{len(min_worker_violations)} dias/turnos por debajo del minimo"
     })
 
-    # 4) Descansos semanales por trabajador
+    # 4) Descansos semanales por trabajador (exactos)
     weekly_rest_violations = 0
     required_rest_days = max(2, cfg['weekly_rest_days'])
     for worker_id, w_shifts in shifts_by_worker.items():
@@ -284,16 +284,16 @@ def verify_center_requirements(center_id, week_start=None):
                 day_shift = worked_by_day.get(curr_day, 'L')
                 if day_shift in ['L', 'V', 'B', '']:
                     rest_days += 1
-            if rest_days < required_rest_days:
+            if rest_days != required_rest_days:
                 weekly_rest_violations += 1
                 worker_issues[worker_id].append(
-                    f"Menos de {required_rest_days} descansos en semana {get_week_label(ws)}"
+                    f"Descansos semanales distintos de {required_rest_days} en semana {get_week_label(ws)}"
                 )
 
     check_rows.append({
-        'Requisito': f"Descansos semanales (minimo {required_rest_days} dias)",
+        'Requisito': f"Descansos semanales exactos ({required_rest_days} dias)",
         'Estado': 'OK' if weekly_rest_violations == 0 else 'INCUMPLE',
-        'Detalle': f"{weekly_rest_violations} semanas-trabajador incumplen descanso"
+        'Detalle': f"{weekly_rest_violations} semanas-trabajador con descanso distinto al criterio"
     })
 
     # 5) Descanso minimo entre jornadas
@@ -458,12 +458,16 @@ def solver_automatico(workers_ids, start_date):
     for w in workers_ids:
         for d in range(num_days):
             model.AddExactlyOne(x[w, d, s] for s in shifts)
+
+        # Lunes cerrado para todos: obligatorio libre.
+        model.Add(x[w, 0, 0] == 1)
+
         # Regla: No Tarde(2) o Noche(3) antes de Mañana(1) 
         for d in range(num_days - 1):
             model.AddImplication(x[w, d, 2], x[w, d+1, 1].Not())
             model.AddImplication(x[w, d, 3], x[w, d+1, 1].Not())
-        # Mínimo 2 días libres 
-        model.Add(sum(x[w, d, 0] for d in range(num_days)) >= 2)
+        # Descanso semanal exacto: 2 días libres.
+        model.Add(sum(x[w, d, 0] for d in range(num_days)) == 2)
 
     solver = cp_model.CpSolver()
     if solver.Solve(model) in (cp_model.OPTIMAL, cp_model.FEASIBLE):
