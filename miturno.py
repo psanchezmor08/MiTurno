@@ -8,6 +8,21 @@ from collections import defaultdict
 from ortools.sat.python import cp_model
 import mysql.connector
 
+CENTER_UBEDA = '1'
+CENTER_JAEN = '2'
+
+EXAMPLE_WORKERS = [
+    {'id': 'w1', 'name': 'Pilar', 'surname': 'Barragán', 'center_id': CENTER_UBEDA, 'role': 'WORKER'},
+    {'id': 'w2', 'name': 'Tomás', 'surname': 'Pino', 'center_id': CENTER_UBEDA, 'role': 'WORKER'},
+    {'id': 'w3', 'name': 'Juana', 'surname': 'García', 'center_id': CENTER_UBEDA, 'role': 'WORKER'},
+    {'id': 'w4', 'name': 'Francisco', 'surname': 'Pérez', 'center_id': CENTER_UBEDA, 'role': 'WORKER'},
+    {'id': 'w5', 'name': 'Mercedes', 'surname': 'Rodríguez', 'center_id': CENTER_UBEDA, 'role': 'WORKER'},
+    {'id': 'w6', 'name': 'Ana', 'surname': 'Garrido', 'center_id': CENTER_JAEN, 'role': 'WORKER'},
+    {'id': 'w7', 'name': 'Juan Antonio', 'surname': 'Simarro', 'center_id': CENTER_JAEN, 'role': 'WORKER'},
+    {'id': 'w8', 'name': 'Francisco Ginés', 'surname': 'Cruz', 'center_id': CENTER_JAEN, 'role': 'WORKER'},
+    {'id': 'w9', 'name': 'Joaquín', 'surname': 'Casas', 'center_id': CENTER_JAEN, 'role': 'WORKER'}
+]
+
 # --- 1. CONFIGURACIÓN Y ESTILOS (ADA/PEMA) ---
 st.set_page_config(page_title="MiTurno - Gestión de Centros ADA", layout="wide", page_icon="🗓️")
 
@@ -84,11 +99,7 @@ if 'db' not in st.session_state:
             {'id': '4', 'name': 'Museo de Cazorla'},
             {'id': '5', 'name': 'Conjunto Arqueológico Cástulo'}
         ],
-        'workers': [
-            {'id': 'w1', 'name': 'Juan', 'surname': 'Pérez', 'center_id': '1', 'role': 'EDITOR'},
-            {'id': 'w2', 'name': 'María', 'surname': 'García', 'center_id': '1', 'role': 'READER'},
-            {'id': 'w3', 'name': 'Luis', 'surname': 'Rodríguez', 'center_id': '2', 'role': 'WORKER'}
-        ],
+        'workers': EXAMPLE_WORKERS.copy(),
         'shifts': [], # Formato: {'worker_id': 'w1', 'date': '2024-03-20', 'type': 'M'}
         'requirements_global': [
             {'key': 'monday_closed', 'description': 'Cierre de sedes los lunes', 'enabled': True, 'value': '1'},
@@ -202,6 +213,38 @@ def seed_workers_if_empty(workers_seed):
             conn.close()
 
 
+def upsert_workers_mysql(workers_seed):
+    if not st.session_state.mysql_connected:
+        return
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection(use_database=True)
+        cursor = conn.cursor()
+        cursor.executemany(
+            """
+            INSERT INTO workers (id, name, surname, center_id, role)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                name = VALUES(name),
+                surname = VALUES(surname),
+                center_id = VALUES(center_id),
+                role = VALUES(role)
+            """,
+            [(w['id'], w['name'], w['surname'], w['center_id'], w['role']) for w in workers_seed]
+        )
+        conn.commit()
+    except mysql.connector.Error as e:
+        st.session_state.mysql_connected = False
+        st.session_state.mysql_last_error = str(e)
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
 def load_workers_from_mysql():
     if not st.session_state.mysql_connected:
         return None
@@ -260,6 +303,55 @@ def insert_worker_mysql(worker):
             conn.close()
 
 
+def update_worker_mysql(worker):
+    if not st.session_state.mysql_connected:
+        return False
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection(use_database=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE workers SET name=%s, surname=%s, center_id=%s, role=%s WHERE id=%s",
+            (worker['name'], worker['surname'], worker['center_id'], worker['role'], worker['id'])
+        )
+        conn.commit()
+        return True
+    except mysql.connector.Error as e:
+        st.session_state.mysql_connected = False
+        st.session_state.mysql_last_error = str(e)
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def delete_worker_mysql(worker_id):
+    if not st.session_state.mysql_connected:
+        return False
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection(use_database=True)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM workers WHERE id=%s", (worker_id,))
+        conn.commit()
+        return True
+    except mysql.connector.Error as e:
+        st.session_state.mysql_connected = False
+        st.session_state.mysql_last_error = str(e)
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
 def next_worker_id(workers):
     max_n = 0
     for w in workers:
@@ -273,7 +365,8 @@ def ensure_mysql_ready():
     # Reintenta conexión en cada recarga para evitar el falso "no disponible"
     # cuando MySQL tarda un poco en iniciar.
     if init_mysql_schema():
-        seed_workers_if_empty(st.session_state.db['workers'])
+        seed_workers_if_empty(EXAMPLE_WORKERS)
+        upsert_workers_mysql(EXAMPLE_WORKERS)
         workers_db = load_workers_from_mysql()
         if workers_db is not None:
             st.session_state.db['workers'] = workers_db
@@ -355,6 +448,65 @@ def get_week_start(selected_date):
 def get_week_label(week_start):
     iso = week_start.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
+
+
+def load_example_week_shifts(center_id, week_start):
+    # Patrón de ejemplo basado en el PDF compartido para visualizar horarios reales por trabajador.
+    ubeda_pattern = {
+        1: {'M': ['Pilar Barragán', 'Tomás Pino'], 'T': ['Juana García', 'Francisco Pérez']},
+        2: {'M': ['Mercedes Rodríguez', 'Francisco Pérez'], 'T': ['Pilar Barragán', 'Juana García']},
+        3: {'M': ['Tomás Pino', 'Juana García'], 'T': ['Mercedes Rodríguez', 'Pilar Barragán']},
+        4: {'M': ['Francisco Pérez', 'Pilar Barragán'], 'T': ['Tomás Pino', 'Mercedes Rodríguez']},
+        5: {'M': ['Juana García', 'Mercedes Rodríguez'], 'T': ['Francisco Pérez', 'Tomás Pino']},
+        6: {'M': ['Pilar Barragán', 'Francisco Pérez'], 'T': ['Juana García', 'Tomás Pino']}
+    }
+
+    jaen_pattern = {
+        1: {'M': ['Ana Garrido', 'Juan Antonio Simarro'], 'T': ['Francisco Ginés Cruz', 'Joaquín Casas']},
+        2: {'M': ['Francisco Ginés Cruz', 'Ana Garrido'], 'T': ['Juan Antonio Simarro', 'Joaquín Casas']},
+        3: {'M': ['Joaquín Casas', 'Juan Antonio Simarro'], 'T': ['Ana Garrido', 'Francisco Ginés Cruz']},
+        4: {'M': ['Ana Garrido', 'Joaquín Casas'], 'T': ['Francisco Ginés Cruz', 'Juan Antonio Simarro']},
+        5: {'M': ['Juan Antonio Simarro', 'Francisco Ginés Cruz'], 'T': ['Ana Garrido', 'Joaquín Casas']},
+        6: {'M': ['Joaquín Casas', 'Ana Garrido'], 'T': ['Juan Antonio Simarro', 'Francisco Ginés Cruz']}
+    }
+
+    pattern = ubeda_pattern if center_id == CENTER_UBEDA else jaen_pattern if center_id == CENTER_JAEN else {}
+    if not pattern:
+        return 0
+
+    workers_center = [w for w in st.session_state.db['workers'] if w['center_id'] == center_id]
+    workers_by_name = {f"{w['name']} {w['surname']}": w['id'] for w in workers_center}
+
+    new_shifts = []
+    for offset in range(7):
+        day = week_start + timedelta(days=offset)
+        if day.weekday() == 0:
+            continue  # lunes cerrado
+
+        day_pattern = pattern.get(day.weekday())
+        if not day_pattern:
+            continue
+
+        day_str = day.strftime('%Y-%m-%d')
+        for shift_type in ['M', 'T']:
+            for worker_name in day_pattern.get(shift_type, []):
+                worker_id = workers_by_name.get(worker_name)
+                if worker_id:
+                    new_shifts.append({'worker_id': worker_id, 'date': day_str, 'type': shift_type})
+
+    center_worker_ids = {w['id'] for w in workers_center}
+    new_dates = {s['date'] for s in new_shifts}
+    st.session_state.db['shifts'] = [
+        s for s in st.session_state.db['shifts']
+        if not (s['worker_id'] in center_worker_ids and s['date'] in new_dates)
+    ]
+
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    for s in new_shifts:
+        s['source'] = 'PDF_EJEMPLO'
+        s['created_at'] = timestamp
+    st.session_state.db['shifts'].extend(new_shifts)
+    return len(new_shifts)
 
 
 def verify_center_requirements(center_id, week_start=None):
@@ -745,6 +897,80 @@ elif menu == "👥 Trabajadores":
     st.write("### Plantilla")
     st.dataframe(pd.DataFrame(st.session_state.db['workers']), use_container_width=True)
 
+    if st.session_state.db['workers']:
+        st.write("### Editar o borrar trabajador")
+        worker_labels = [f"{w['id']} - {w['name']} {w['surname']}" for w in st.session_state.db['workers']]
+        selected_label = st.selectbox("Selecciona trabajador", worker_labels)
+        selected_id = selected_label.split(" - ")[0]
+        selected_worker = next(w for w in st.session_state.db['workers'] if w['id'] == selected_id)
+
+        with st.form("edit_worker_form"):
+            ec1, ec2 = st.columns(2)
+            edit_name = ec1.text_input("Nombre (editar)", value=selected_worker['name'])
+            edit_surname = ec2.text_input("Apellidos (editar)", value=selected_worker['surname'])
+            center_names = [c['name'] for c in st.session_state.db['centers']]
+            current_center_name = next(
+                c['name'] for c in st.session_state.db['centers'] if c['id'] == selected_worker['center_id']
+            )
+            edit_center_name = st.selectbox(
+                "Sede (editar)",
+                center_names,
+                index=center_names.index(current_center_name)
+            )
+            roles = ["WORKER", "EDITOR", "ADMIN"]
+            edit_role = st.selectbox("Rol (editar)", roles, index=roles.index(selected_worker['role']))
+
+            save_edit = st.form_submit_button("Guardar cambios trabajador")
+            if save_edit:
+                edit_center_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == edit_center_name)
+                updated_worker = {
+                    'id': selected_worker['id'],
+                    'name': edit_name,
+                    'surname': edit_surname,
+                    'center_id': edit_center_id,
+                    'role': edit_role
+                }
+
+                if st.session_state.mysql_connected:
+                    if update_worker_mysql(updated_worker):
+                        workers_db = load_workers_from_mysql()
+                        if workers_db is not None:
+                            st.session_state.db['workers'] = workers_db
+                        st.success("Trabajador actualizado en MySQL.")
+                        st.rerun()
+                    else:
+                        st.error("No se pudo actualizar en MySQL.")
+                else:
+                    for i, w in enumerate(st.session_state.db['workers']):
+                        if w['id'] == selected_worker['id']:
+                            st.session_state.db['workers'][i] = updated_worker
+                            break
+                    st.success("Trabajador actualizado en sesión local.")
+                    st.rerun()
+
+        if st.button("🗑️ Borrar trabajador seleccionado"):
+            if st.session_state.mysql_connected:
+                if delete_worker_mysql(selected_worker['id']):
+                    workers_db = load_workers_from_mysql()
+                    if workers_db is not None:
+                        st.session_state.db['workers'] = workers_db
+                    st.session_state.db['shifts'] = [
+                        s for s in st.session_state.db['shifts'] if s['worker_id'] != selected_worker['id']
+                    ]
+                    st.success("Trabajador eliminado de MySQL.")
+                    st.rerun()
+                else:
+                    st.error("No se pudo borrar en MySQL.")
+            else:
+                st.session_state.db['workers'] = [
+                    w for w in st.session_state.db['workers'] if w['id'] != selected_worker['id']
+                ]
+                st.session_state.db['shifts'] = [
+                    s for s in st.session_state.db['shifts'] if s['worker_id'] != selected_worker['id']
+                ]
+                st.success("Trabajador eliminado de la sesión local.")
+                st.rerun()
+
 elif menu == "🗓️ Cuadrante Semanal":
     st.title("Cuadrante Semanal")
     center_sel = st.selectbox("Filtrar por Sede", [c['name'] for c in st.session_state.db['centers']])
@@ -753,6 +979,14 @@ elif menu == "🗓️ Cuadrante Semanal":
     week_start = get_week_start(fecha_ref)
     week_end = week_start + timedelta(days=6)
     st.caption(f"Semana visualizada: {week_start.strftime('%d/%m/%Y')} - {week_end.strftime('%d/%m/%Y')} ({get_week_label(week_start)})")
+
+    if st.button("📄 Cargar horarios de ejemplo (PDF) para esta semana"):
+        total_loaded = load_example_week_shifts(c_id, week_start)
+        if total_loaded > 0:
+            st.success(f"Se cargaron {total_loaded} turnos de ejemplo para la semana {get_week_label(week_start)}.")
+            st.rerun()
+        else:
+            st.info("No se encontraron trabajadores de ejemplo para esta sede.")
     
     # Filtrar trabajadores y sus turnos
     workers_sede = [w for w in st.session_state.db['workers'] if w['center_id'] == c_id]
