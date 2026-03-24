@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import json
 import calendar
+from collections import defaultdict
 from ortools.sat.python import cp_model
 
 # --- 1. CONFIGURACIÓN Y ESTILOS (ADA/PEMA) ---
@@ -86,7 +87,283 @@ if 'db' not in st.session_state:
             {'id': 'w2', 'name': 'María', 'surname': 'García', 'center_id': '1', 'role': 'READER'},
             {'id': 'w3', 'name': 'Luis', 'surname': 'Rodríguez', 'center_id': '2', 'role': 'WORKER'}
         ],
-        'shifts': [] # Formato: {'worker_id': 'w1', 'date': '2024-03-20', 'type': 'M'}
+        'shifts': [], # Formato: {'worker_id': 'w1', 'date': '2024-03-20', 'type': 'M'}
+        'requirements_global': [
+            {'key': 'monday_closed', 'description': 'Cierre de sedes los lunes', 'enabled': True, 'value': '1'},
+            {'key': 'summer_only_morning', 'description': 'En verano solo turno de mañana (15/06 al 15/09)', 'enabled': True, 'value': '1'},
+            {'key': 'min_workers_per_shift', 'description': 'Mínimo de trabajadores por turno', 'enabled': True, 'value': '2'},
+            {'key': 'minimum_rest_hours', 'description': 'Descanso mínimo entre jornadas (horas)', 'enabled': True, 'value': '18'},
+            {'key': 'rotation_required', 'description': 'Debe existir rotación entre mañana/tarde/noche', 'enabled': True, 'value': '1'},
+            {'key': 'max_work_days_year', 'description': 'Límite anual de días trabajados', 'enabled': True, 'value': '246'},
+            {'key': 'compensation_after_sunday_holiday', 'description': 'Compensación tras domingo/festivo', 'enabled': True, 'value': '1'},
+            {'key': 'mandatory_closed_holidays', 'description': 'Festivos con cierre obligatorio (01/01,06/01,01/05,24/12,25/12,31/12)', 'enabled': True, 'value': '1'}
+        ],
+        'requirements_weekly': [],
+        'verification_history': []
+    }
+
+if 'last_verification_by_center' not in st.session_state:
+    st.session_state.last_verification_by_center = {}
+
+
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ['1', 'true', 'yes', 'si', 'sí']
+
+
+def parse_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_requirements_config():
+    req_map = {r['key']: r for r in st.session_state.db.get('requirements_global', [])}
+    cfg = {
+        'monday_closed': parse_bool(req_map.get('monday_closed', {}).get('enabled', True)),
+        'summer_only_morning': parse_bool(req_map.get('summer_only_morning', {}).get('enabled', True)),
+        'min_workers_per_shift': parse_int(req_map.get('min_workers_per_shift', {}).get('value', 2), 2),
+        'minimum_rest_hours': parse_int(req_map.get('minimum_rest_hours', {}).get('value', 18), 18),
+        'rotation_required': parse_bool(req_map.get('rotation_required', {}).get('enabled', True)),
+        'max_work_days_year': parse_int(req_map.get('max_work_days_year', {}).get('value', 246), 246),
+        'compensation_after_sunday_holiday': parse_bool(req_map.get('compensation_after_sunday_holiday', {}).get('enabled', True)),
+        'mandatory_closed_holidays': parse_bool(req_map.get('mandatory_closed_holidays', {}).get('enabled', True))
+    }
+    return cfg
+
+
+def is_summer_date(d):
+    year = d.year
+    start = datetime(year, 6, 15).date()
+    end = datetime(year, 9, 15).date()
+    return start <= d <= end
+
+
+def fixed_holidays_for_year(year):
+    return {
+        datetime(year, 1, 1).date(),
+        datetime(year, 1, 6).date(),
+        datetime(year, 5, 1).date(),
+        datetime(year, 12, 24).date(),
+        datetime(year, 12, 25).date(),
+        datetime(year, 12, 31).date()
+    }
+
+
+def shift_interval(day, shift_type):
+    if shift_type == 'M':
+        return datetime(day.year, day.month, day.day, 7, 0), datetime(day.year, day.month, day.day, 14, 0)
+    if shift_type == 'T':
+        return datetime(day.year, day.month, day.day, 14, 0), datetime(day.year, day.month, day.day, 21, 0)
+    if shift_type == 'N':
+        return datetime(day.year, day.month, day.day, 21, 0), datetime(day.year, day.month, day.day, 23, 59)
+    return None, None
+
+
+def build_weekly_min_workers_map(center_id):
+    weekly_map = {}
+    for row in st.session_state.db.get('requirements_weekly', []):
+        if row.get('center_id') == center_id and row.get('enabled', True):
+            weekly_map[row.get('week_key')] = parse_int(row.get('min_workers_per_shift', 2), 2)
+    return weekly_map
+
+
+def verify_center_requirements(center_id):
+    workers = [w for w in st.session_state.db['workers'] if w['center_id'] == center_id]
+    workers_map = {w['id']: w for w in workers}
+    center_shifts = [s for s in st.session_state.db['shifts'] if s['worker_id'] in workers_map]
+    center_shifts_sorted = sorted(center_shifts, key=lambda x: (x['date'], x['worker_id']))
+
+    cfg = get_requirements_config()
+    weekly_min_workers = build_weekly_min_workers_map(center_id)
+
+    check_rows = []
+    worker_issues = defaultdict(list)
+
+    shifts_by_day_type = defaultdict(list)
+    shifts_by_worker = defaultdict(list)
+    shifts_by_day = defaultdict(list)
+    for s in center_shifts_sorted:
+        day = datetime.strptime(s['date'], '%Y-%m-%d').date()
+        shifts_by_day_type[(day, s['type'])].append(s['worker_id'])
+        shifts_by_worker[s['worker_id']].append(s)
+        shifts_by_day[day].append(s)
+
+    # 1) Cierre los lunes
+    monday_violations = []
+    if cfg['monday_closed']:
+        for s in center_shifts_sorted:
+            day = datetime.strptime(s['date'], '%Y-%m-%d').date()
+            if day.weekday() == 0 and s['type'] not in ['L', 'V', 'B']:
+                monday_violations.append(s)
+                worker_issues[s['worker_id']].append('Trabaja en lunes cerrado')
+    check_rows.append({
+        'Requisito': 'Cierre de sedes los lunes',
+        'Estado': 'OK' if not monday_violations else 'INCUMPLE',
+        'Detalle': f"{len(monday_violations)} turnos encontrados en lunes"
+    })
+
+    # 2) Verano solo mañana
+    summer_violations = []
+    if cfg['summer_only_morning']:
+        for s in center_shifts_sorted:
+            day = datetime.strptime(s['date'], '%Y-%m-%d').date()
+            if is_summer_date(day) and s['type'] in ['T', 'N']:
+                summer_violations.append(s)
+                worker_issues[s['worker_id']].append('Turno tarde/noche en periodo de verano')
+    check_rows.append({
+        'Requisito': 'Verano solo turno de mañana',
+        'Estado': 'OK' if not summer_violations else 'INCUMPLE',
+        'Detalle': f"{len(summer_violations)} turnos fuera de regla"
+    })
+
+    # 3) Minimo trabajadores por turno (admite override semanal por sede)
+    min_worker_violations = []
+    all_days = sorted(shifts_by_day.keys())
+    for day in all_days:
+        week_key = f"{day.isocalendar().year}-W{day.isocalendar().week:02d}"
+        required = weekly_min_workers.get(week_key, cfg['min_workers_per_shift'])
+        expected_types = ['M'] if is_summer_date(day) else ['M', 'T']
+        for t in expected_types:
+            assigned = len(shifts_by_day_type.get((day, t), []))
+            if assigned < required:
+                min_worker_violations.append((day, t, assigned, required))
+    check_rows.append({
+        'Requisito': 'Minimo de trabajadores por turno',
+        'Estado': 'OK' if not min_worker_violations else 'INCUMPLE',
+        'Detalle': f"{len(min_worker_violations)} dias/turnos por debajo del minimo"
+    })
+
+    # 4) Descanso minimo entre jornadas
+    rest_violations = 0
+    for worker_id, w_shifts in shifts_by_worker.items():
+        worked = [s for s in w_shifts if s['type'] in ['M', 'T', 'N']]
+        worked = sorted(worked, key=lambda x: x['date'])
+        previous_end = None
+        for s in worked:
+            day = datetime.strptime(s['date'], '%Y-%m-%d').date()
+            start_dt, end_dt = shift_interval(day, s['type'])
+            if previous_end and start_dt:
+                rest_hours = (start_dt - previous_end).total_seconds() / 3600
+                if rest_hours < cfg['minimum_rest_hours']:
+                    rest_violations += 1
+                    worker_issues[worker_id].append(f'Descanso insuficiente ({rest_hours:.1f}h)')
+            if end_dt:
+                previous_end = end_dt
+    check_rows.append({
+        'Requisito': f"Descanso minimo de {cfg['minimum_rest_hours']}h",
+        'Estado': 'OK' if rest_violations == 0 else 'INCUMPLE',
+        'Detalle': f"{rest_violations} transiciones con descanso insuficiente"
+    })
+
+    # 5) Rotacion entre turnos
+    rotation_violations = 0
+    if cfg['rotation_required']:
+        for worker_id, w_shifts in shifts_by_worker.items():
+            types = {s['type'] for s in w_shifts if s['type'] in ['M', 'T', 'N']}
+            worked_days = len([s for s in w_shifts if s['type'] in ['M', 'T', 'N']])
+            if worked_days >= 4 and len(types) < 2:
+                rotation_violations += 1
+                worker_issues[worker_id].append('No existe rotacion de turnos')
+    check_rows.append({
+        'Requisito': 'Rotacion de turnos',
+        'Estado': 'OK' if rotation_violations == 0 else 'INCUMPLE',
+        'Detalle': f"{rotation_violations} trabajadores sin rotacion"
+    })
+
+    # 6) Limite anual de dias trabajados
+    annual_limit_violations = 0
+    for worker_id, w_shifts in shifts_by_worker.items():
+        by_year = defaultdict(int)
+        for s in w_shifts:
+            if s['type'] in ['M', 'T', 'N', 'Mr', 'Tr']:
+                year = datetime.strptime(s['date'], '%Y-%m-%d').year
+                by_year[year] += 1
+        for _, worked_days in by_year.items():
+            if worked_days > cfg['max_work_days_year']:
+                annual_limit_violations += 1
+                worker_issues[worker_id].append(f'Supera el limite anual de {cfg["max_work_days_year"]} dias')
+                break
+    check_rows.append({
+        'Requisito': f"Limite anual de {cfg['max_work_days_year']} dias",
+        'Estado': 'OK' if annual_limit_violations == 0 else 'INCUMPLE',
+        'Detalle': f"{annual_limit_violations} trabajadores superan el limite"
+    })
+
+    # 7) Compensacion domingos/festivos
+    compensation_violations = 0
+    if cfg['compensation_after_sunday_holiday']:
+        shifts_by_worker_date = defaultdict(dict)
+        for worker_id, w_shifts in shifts_by_worker.items():
+            for s in w_shifts:
+                day = datetime.strptime(s['date'], '%Y-%m-%d').date()
+                shifts_by_worker_date[worker_id][day] = s['type']
+        for worker_id, by_date in shifts_by_worker_date.items():
+            for day, shift_type in by_date.items():
+                if shift_type not in ['M', 'T', 'N', 'Mr', 'Tr']:
+                    continue
+                holidays = fixed_holidays_for_year(day.year)
+                if day.weekday() == 6 or day in holidays:
+                    has_compensation = False
+                    for delta in range(1, 8):
+                        next_day = day + timedelta(days=delta)
+                        if by_date.get(next_day) in ['L', 'V', 'B']:
+                            has_compensation = True
+                            break
+                    if not has_compensation:
+                        compensation_violations += 1
+                        worker_issues[worker_id].append('Sin compensacion tras domingo/festivo')
+    check_rows.append({
+        'Requisito': 'Compensacion por domingo/festivo',
+        'Estado': 'OK' if compensation_violations == 0 else 'INCUMPLE',
+        'Detalle': f"{compensation_violations} casos sin compensacion"
+    })
+
+    # 8) Cierre de festivos obligatorios
+    holiday_close_violations = 0
+    if cfg['mandatory_closed_holidays']:
+        for day, day_shifts in shifts_by_day.items():
+            if day in fixed_holidays_for_year(day.year):
+                for s in day_shifts:
+                    if s['type'] not in ['L', 'V', 'B']:
+                        holiday_close_violations += 1
+                        worker_issues[s['worker_id']].append('Turno asignado en festivo de cierre obligatorio')
+    check_rows.append({
+        'Requisito': 'Festivos de cierre obligatorio',
+        'Estado': 'OK' if holiday_close_violations == 0 else 'INCUMPLE',
+        'Detalle': f"{holiday_close_violations} turnos en festivos cerrados"
+    })
+
+    worker_rows = []
+    for w in workers:
+        user_shifts = [s for s in shifts_by_worker.get(w['id'], []) if s['type'] in ['M', 'T', 'N', 'Mr', 'Tr']]
+        hours = sum(SHIFT_TYPES.get(s['type'], {}).get('hours', 0) for s in user_shifts)
+        issues = worker_issues.get(w['id'], [])
+        worker_rows.append({
+            'Usuario': f"{w['name']} {w['surname']}",
+            'Cumple': 'SI' if len(issues) == 0 else 'NO',
+            'Incidencias': len(issues),
+            'Dias trabajados': len(user_shifts),
+            'Horas': hours,
+            'Detalle': ' | '.join(sorted(set(issues))) if issues else 'Sin incidencias'
+        })
+
+    checks_df = pd.DataFrame(check_rows)
+    workers_df = pd.DataFrame(worker_rows)
+    ok_checks = len(checks_df[checks_df['Estado'] == 'OK']) if not checks_df.empty else 0
+    summary = {
+        'ok_checks': ok_checks,
+        'total_checks': len(check_rows),
+        'workers_ok': len(workers_df[workers_df['Cumple'] == 'SI']) if not workers_df.empty else 0,
+        'workers_total': len(workers_df)
+    }
+    return {
+        'checks_df': checks_df,
+        'workers_df': workers_df,
+        'summary': summary,
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
 
 # --- 3. LÓGICA DE TURNOS (TRADUCCIÓN DE LA BETA) ---
@@ -141,7 +418,20 @@ def solver_automatico(workers_ids, start_date):
 with st.sidebar:
     st.image("https://www.ada.es/export/sites/ada/.content/imagenes/logo-ada.png", width=180)
     st.markdown("### PANEL DE CONTROL")
-    menu = st.radio("Menú", ["🏠 Inicio", "🏢 Sedes", "👥 Trabajadores", "🗓️ Cuadrante Mensual", "🤖 Generador IA"], label_visibility="collapsed")
+    menu = st.radio(
+        "Menú",
+        [
+            "🏠 Inicio",
+            "🏢 Sedes",
+            "👥 Trabajadores",
+            "🗓️ Cuadrante Mensual",
+            "🤖 Generador IA",
+            "✅ Verificación por Sede",
+            "📚 Historial de Usuarios",
+            "⚙️ Requisitos"
+        ],
+        label_visibility="collapsed"
+    )
     st.markdown("---")
     st.caption("© 2024 Agencia Digital de Andalucía")
 
@@ -238,7 +528,198 @@ elif menu == "🤖 Generador IA":
         with st.spinner("Calculando cuadrante óptimo..."):
             nuevos_turnos = solver_automatico(w_ids, fecha_inicio)
             if nuevos_turnos:
+                fechas_nuevas = {s['date'] for s in nuevos_turnos}
+                st.session_state.db['shifts'] = [
+                    s for s in st.session_state.db['shifts']
+                    if not (s['worker_id'] in w_ids and s['date'] in fechas_nuevas)
+                ]
+
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                for s in nuevos_turnos:
+                    s['source'] = 'IA'
+                    s['created_at'] = timestamp
+
                 st.session_state.db['shifts'].extend(nuevos_turnos)
                 st.success(f"¡Generados {len(nuevos_turnos)} turnos con éxito!")
+
+                verif = verify_center_requirements(c_id)
+                st.session_state.last_verification_by_center[c_id] = verif
+                st.session_state.db['verification_history'].append({
+                    'timestamp': verif['generated_at'],
+                    'center_id': c_id,
+                    'ok_checks': verif['summary']['ok_checks'],
+                    'total_checks': verif['summary']['total_checks'],
+                    'workers_ok': verif['summary']['workers_ok'],
+                    'workers_total': verif['summary']['workers_total']
+                })
+                st.info(
+                    f"Verificación automática completada: "
+                    f"{verif['summary']['ok_checks']}/{verif['summary']['total_checks']} requisitos OK | "
+                    f"{verif['summary']['workers_ok']}/{verif['summary']['workers_total']} trabajadores cumplen"
+                )
             else:
                 st.error("No se pudo encontrar una solución válida con el personal actual.")
+
+elif menu == "✅ Verificación por Sede":
+    st.title("Verificación de Requisitos por Sede")
+    st.markdown("Selecciona una sede para validar automáticamente los requisitos del checklist y ver el estado por trabajador.")
+
+    sede_ver = st.selectbox("Sede para verificar", [c['name'] for c in st.session_state.db['centers']])
+    c_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == sede_ver)
+
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        run_now = st.button("Verificar ahora")
+    with col_b:
+        use_last = st.button("Cargar última verificación")
+
+    if run_now:
+        verif = verify_center_requirements(c_id)
+        st.session_state.last_verification_by_center[c_id] = verif
+        st.session_state.db['verification_history'].append({
+            'timestamp': verif['generated_at'],
+            'center_id': c_id,
+            'ok_checks': verif['summary']['ok_checks'],
+            'total_checks': verif['summary']['total_checks'],
+            'workers_ok': verif['summary']['workers_ok'],
+            'workers_total': verif['summary']['workers_total']
+        })
+
+    verif_data = st.session_state.last_verification_by_center.get(c_id) if use_last or not run_now else st.session_state.last_verification_by_center.get(c_id)
+
+    if verif_data:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Checks OK", f"{verif_data['summary']['ok_checks']}/{verif_data['summary']['total_checks']}")
+        c2.metric("Trabajadores que cumplen", f"{verif_data['summary']['workers_ok']}/{verif_data['summary']['workers_total']}")
+        c3.metric("Última ejecución", verif_data['generated_at'])
+        c4.metric("Estado general", "OK" if verif_data['summary']['ok_checks'] == verif_data['summary']['total_checks'] else "REVISAR")
+
+        st.subheader("Checklist de requisitos")
+        st.dataframe(verif_data['checks_df'], use_container_width=True)
+
+        st.subheader("Usuarios de la sede con verificación")
+        st.dataframe(verif_data['workers_df'], use_container_width=True)
+    else:
+        st.warning("Aún no hay verificación guardada para esta sede. Pulsa 'Verificar ahora'.")
+
+elif menu == "📚 Historial de Usuarios":
+    st.title("Historial de Usuarios")
+    st.markdown("Consulta el historial de turnos por sede y por trabajador.")
+
+    sede_hist = st.selectbox("Sede", [c['name'] for c in st.session_state.db['centers']])
+    c_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == sede_hist)
+
+    workers_sede = [w for w in st.session_state.db['workers'] if w['center_id'] == c_id]
+    worker_options = ['Todos'] + [f"{w['name']} {w['surname']}" for w in workers_sede]
+    worker_selected = st.selectbox("Trabajador", worker_options)
+
+    ids_filtrados = {w['id'] for w in workers_sede}
+    if worker_selected != 'Todos':
+        w_obj = next(w for w in workers_sede if f"{w['name']} {w['surname']}" == worker_selected)
+        ids_filtrados = {w_obj['id']}
+
+    rows_hist = []
+    for s in st.session_state.db['shifts']:
+        if s['worker_id'] in ids_filtrados:
+            w = next(x for x in workers_sede if x['id'] == s['worker_id'])
+            rows_hist.append({
+                'Fecha': s['date'],
+                'Usuario': f"{w['name']} {w['surname']}",
+                'Turno': s['type'],
+                'Horas': SHIFT_TYPES.get(s['type'], {}).get('hours', 0),
+                'Origen': s.get('source', 'Manual'),
+                'Creado': s.get('created_at', '-')
+            })
+
+    if rows_hist:
+        df_hist = pd.DataFrame(rows_hist).sort_values(['Fecha', 'Usuario'])
+        st.dataframe(df_hist, use_container_width=True)
+
+        st.subheader("Resumen por usuario")
+        resumen = df_hist.groupby('Usuario', as_index=False).agg(
+            Turnos=('Turno', 'count'),
+            Horas=('Horas', 'sum')
+        )
+        st.dataframe(resumen, use_container_width=True)
+    else:
+        st.info("No hay turnos registrados para el filtro seleccionado.")
+
+    st.subheader("Historial de verificaciones")
+    verif_rows = [
+        v for v in st.session_state.db.get('verification_history', []) if v['center_id'] == c_id
+    ]
+    if verif_rows:
+        df_ver_hist = pd.DataFrame(verif_rows)
+        df_ver_hist['Sede'] = sede_hist
+        st.dataframe(df_ver_hist[['timestamp', 'Sede', 'ok_checks', 'total_checks', 'workers_ok', 'workers_total']], use_container_width=True)
+    else:
+        st.caption("Sin verificaciones registradas todavía para esta sede.")
+
+elif menu == "⚙️ Requisitos":
+    st.title("Configuración de Requisitos")
+    st.markdown("Define reglas globales y ajustes semanales por sede (cuando cambian por semana).")
+
+    st.subheader("Requisitos globales")
+    req_df = pd.DataFrame(st.session_state.db['requirements_global'])
+    req_df = req_df[['key', 'description', 'enabled', 'value']]
+    edited_req_df = st.data_editor(
+        req_df,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            'key': st.column_config.TextColumn('Clave', disabled=True),
+            'description': st.column_config.TextColumn('Descripción'),
+            'enabled': st.column_config.CheckboxColumn('Activo'),
+            'value': st.column_config.TextColumn('Valor')
+        }
+    )
+
+    if st.button("Guardar requisitos globales"):
+        st.session_state.db['requirements_global'] = edited_req_df.to_dict(orient='records')
+        st.success("Requisitos globales actualizados.")
+
+    st.subheader("Requisitos semanales por sede")
+    with st.form('weekly_requirement_form'):
+        col1, col2, col3 = st.columns(3)
+        center_name = col1.selectbox('Sede', [c['name'] for c in st.session_state.db['centers']])
+        week_key = col2.text_input('Semana (formato AAAA-W##)', value=f"{datetime.now().isocalendar().year}-W{datetime.now().isocalendar().week:02d}")
+        min_workers = col3.number_input('Mínimo trabajadores por turno', min_value=1, max_value=10, value=2, step=1)
+        notes = st.text_input('Notas')
+        enabled = st.checkbox('Activo', value=True)
+        submitted = st.form_submit_button('Añadir/Actualizar semana')
+
+        if submitted:
+            center_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == center_name)
+            updated = False
+            for row in st.session_state.db['requirements_weekly']:
+                if row['center_id'] == center_id and row['week_key'] == week_key:
+                    row['min_workers_per_shift'] = int(min_workers)
+                    row['notes'] = notes
+                    row['enabled'] = enabled
+                    updated = True
+                    break
+            if not updated:
+                st.session_state.db['requirements_weekly'].append({
+                    'center_id': center_id,
+                    'week_key': week_key,
+                    'min_workers_per_shift': int(min_workers),
+                    'notes': notes,
+                    'enabled': enabled
+                })
+            st.success('Requisito semanal guardado.')
+
+    weekly_rows = []
+    for row in st.session_state.db['requirements_weekly']:
+        center_name = next((c['name'] for c in st.session_state.db['centers'] if c['id'] == row['center_id']), row['center_id'])
+        weekly_rows.append({
+            'Sede': center_name,
+            'Semana': row['week_key'],
+            'Min trabajadores': row['min_workers_per_shift'],
+            'Activo': row.get('enabled', True),
+            'Notas': row.get('notes', '')
+        })
+
+    if weekly_rows:
+        st.dataframe(pd.DataFrame(weekly_rows), use_container_width=True)
+    else:
+        st.caption('No hay requisitos semanales definidos todavía.')
