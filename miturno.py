@@ -92,6 +92,7 @@ if 'db' not in st.session_state:
             {'key': 'monday_closed', 'description': 'Cierre de sedes los lunes', 'enabled': True, 'value': '1'},
             {'key': 'summer_only_morning', 'description': 'En verano solo turno de mañana (15/06 al 15/09)', 'enabled': True, 'value': '1'},
             {'key': 'min_workers_per_shift', 'description': 'Mínimo de trabajadores por turno', 'enabled': True, 'value': '2'},
+            {'key': 'weekly_rest_days', 'description': 'Descansos semanales mínimos por trabajador', 'enabled': True, 'value': '2'},
             {'key': 'minimum_rest_hours', 'description': 'Descanso mínimo entre jornadas (horas)', 'enabled': True, 'value': '18'},
             {'key': 'rotation_required', 'description': 'Debe existir rotación entre mañana/tarde/noche', 'enabled': True, 'value': '1'},
             {'key': 'max_work_days_year', 'description': 'Límite anual de días trabajados', 'enabled': True, 'value': '246'},
@@ -121,15 +122,17 @@ def parse_int(value, default):
 
 def get_requirements_config():
     req_map = {r['key']: r for r in st.session_state.db.get('requirements_global', [])}
+    # Reglas de cumplimiento estricto: siempre activas.
     cfg = {
-        'monday_closed': parse_bool(req_map.get('monday_closed', {}).get('enabled', True)),
-        'summer_only_morning': parse_bool(req_map.get('summer_only_morning', {}).get('enabled', True)),
+        'monday_closed': True,
+        'summer_only_morning': True,
         'min_workers_per_shift': parse_int(req_map.get('min_workers_per_shift', {}).get('value', 2), 2),
+        'weekly_rest_days': parse_int(req_map.get('weekly_rest_days', {}).get('value', 2), 2),
         'minimum_rest_hours': parse_int(req_map.get('minimum_rest_hours', {}).get('value', 18), 18),
-        'rotation_required': parse_bool(req_map.get('rotation_required', {}).get('enabled', True)),
+        'rotation_required': True,
         'max_work_days_year': parse_int(req_map.get('max_work_days_year', {}).get('value', 246), 246),
-        'compensation_after_sunday_holiday': parse_bool(req_map.get('compensation_after_sunday_holiday', {}).get('enabled', True)),
-        'mandatory_closed_holidays': parse_bool(req_map.get('mandatory_closed_holidays', {}).get('enabled', True))
+        'compensation_after_sunday_holiday': True,
+        'mandatory_closed_holidays': True
     }
     return cfg
 
@@ -253,7 +256,47 @@ def verify_center_requirements(center_id, week_start=None):
         'Detalle': f"{len(min_worker_violations)} dias/turnos por debajo del minimo"
     })
 
-    # 4) Descanso minimo entre jornadas
+    # 4) Descansos semanales por trabajador
+    weekly_rest_violations = 0
+    required_rest_days = max(2, cfg['weekly_rest_days'])
+    for worker_id, w_shifts in shifts_by_worker.items():
+        worked_by_day = defaultdict(str)
+        for s in w_shifts:
+            day = datetime.strptime(s['date'], '%Y-%m-%d').date()
+            worked_by_day[day] = s['type']
+
+        if week_start is not None:
+            week_ranges = [(week_start, week_start + timedelta(days=6))]
+        else:
+            available_days = sorted(worked_by_day.keys())
+            week_ranges = []
+            seen_weeks = set()
+            for d in available_days:
+                ws = d - timedelta(days=d.weekday())
+                if ws not in seen_weeks:
+                    seen_weeks.add(ws)
+                    week_ranges.append((ws, ws + timedelta(days=6)))
+
+        for ws, we in week_ranges:
+            rest_days = 0
+            for offset in range(7):
+                curr_day = ws + timedelta(days=offset)
+                day_shift = worked_by_day.get(curr_day, 'L')
+                if day_shift in ['L', 'V', 'B', '']:
+                    rest_days += 1
+            if rest_days < required_rest_days:
+                weekly_rest_violations += 1
+                worker_issues[worker_id].append(
+                    f"Menos de {required_rest_days} descansos en semana {get_week_label(ws)}"
+                )
+
+    check_rows.append({
+        'Requisito': f"Descansos semanales (minimo {required_rest_days} dias)",
+        'Estado': 'OK' if weekly_rest_violations == 0 else 'INCUMPLE',
+        'Detalle': f"{weekly_rest_violations} semanas-trabajador incumplen descanso"
+    })
+
+    # 5) Descanso minimo entre jornadas
     rest_violations = 0
     for worker_id, w_shifts in shifts_by_worker.items():
         worked = [s for s in w_shifts if s['type'] in ['M', 'T', 'N']]
@@ -275,7 +318,7 @@ def verify_center_requirements(center_id, week_start=None):
         'Detalle': f"{rest_violations} transiciones con descanso insuficiente"
     })
 
-    # 5) Rotacion entre turnos
+    # 6) Rotacion entre turnos
     rotation_violations = 0
     if cfg['rotation_required']:
         for worker_id, w_shifts in shifts_by_worker.items():
@@ -290,7 +333,7 @@ def verify_center_requirements(center_id, week_start=None):
         'Detalle': f"{rotation_violations} trabajadores sin rotacion"
     })
 
-    # 6) Limite anual de dias trabajados
+    # 7) Limite anual de dias trabajados
     annual_limit_violations = 0
     for worker_id, w_shifts in shifts_by_worker.items():
         by_year = defaultdict(int)
@@ -309,7 +352,7 @@ def verify_center_requirements(center_id, week_start=None):
         'Detalle': f"{annual_limit_violations} trabajadores superan el limite"
     })
 
-    # 7) Compensacion domingos/festivos
+    # 8) Compensacion domingos/festivos
     compensation_violations = 0
     if cfg['compensation_after_sunday_holiday']:
         shifts_by_worker_date = defaultdict(dict)
@@ -338,7 +381,7 @@ def verify_center_requirements(center_id, week_start=None):
         'Detalle': f"{compensation_violations} casos sin compensacion"
     })
 
-    # 8) Cierre de festivos obligatorios
+    # 9) Cierre de festivos obligatorios
     holiday_close_violations = 0
     if cfg['mandatory_closed_holidays']:
         for day, day_shifts in shifts_by_day.items():
