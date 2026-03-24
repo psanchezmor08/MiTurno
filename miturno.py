@@ -170,10 +170,27 @@ def build_weekly_min_workers_map(center_id):
     return weekly_map
 
 
-def verify_center_requirements(center_id):
+def get_week_start(selected_date):
+    return selected_date - timedelta(days=selected_date.weekday())
+
+
+def get_week_label(week_start):
+    iso = week_start.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def verify_center_requirements(center_id, week_start=None):
     workers = [w for w in st.session_state.db['workers'] if w['center_id'] == center_id]
     workers_map = {w['id']: w for w in workers}
     center_shifts = [s for s in st.session_state.db['shifts'] if s['worker_id'] in workers_map]
+
+    if week_start is not None:
+        week_end = week_start + timedelta(days=6)
+        center_shifts = [
+            s for s in center_shifts
+            if week_start <= datetime.strptime(s['date'], '%Y-%m-%d').date() <= week_end
+        ]
+
     center_shifts_sorted = sorted(center_shifts, key=lambda x: (x['date'], x['worker_id']))
 
     cfg = get_requirements_config()
@@ -363,7 +380,10 @@ def verify_center_requirements(center_id):
         'checks_df': checks_df,
         'workers_df': workers_df,
         'summary': summary,
-        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'week_start': week_start.strftime('%Y-%m-%d') if week_start else '-',
+        'week_end': (week_start + timedelta(days=6)).strftime('%Y-%m-%d') if week_start else '-',
+        'week_label': get_week_label(week_start) if week_start else 'Todas las semanas'
     }
 
 # --- 3. LÓGICA DE TURNOS (TRADUCCIÓN DE LA BETA) ---
@@ -424,7 +444,7 @@ with st.sidebar:
             "🏠 Inicio",
             "🏢 Sedes",
             "👥 Trabajadores",
-            "🗓️ Cuadrante Mensual",
+            "🗓️ Cuadrante Semanal",
             "🤖 Generador IA",
             "✅ Verificación por Sede",
             "📚 Historial de Usuarios",
@@ -477,10 +497,14 @@ elif menu == "👥 Trabajadores":
     st.write("### Plantilla")
     st.dataframe(pd.DataFrame(st.session_state.db['workers']), use_container_width=True)
 
-elif menu == "🗓️ Cuadrante Mensual":
-    st.title("Cuadrante de Turnos")
+elif menu == "🗓️ Cuadrante Semanal":
+    st.title("Cuadrante Semanal")
     center_sel = st.selectbox("Filtrar por Sede", [c['name'] for c in st.session_state.db['centers']])
     c_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == center_sel)
+    fecha_ref = st.date_input("Semana de referencia", value=datetime.now())
+    week_start = get_week_start(fecha_ref)
+    week_end = week_start + timedelta(days=6)
+    st.caption(f"Semana visualizada: {week_start.strftime('%d/%m/%Y')} - {week_end.strftime('%d/%m/%Y')} ({get_week_label(week_start)})")
     
     # Filtrar trabajadores y sus turnos
     workers_sede = [w for w in st.session_state.db['workers'] if w['center_id'] == c_id]
@@ -488,11 +512,8 @@ elif menu == "🗓️ Cuadrante Mensual":
     if not workers_sede:
         st.warning("No hay trabajadores en esta sede.")
     else:
-        # Replicamos la tabla del RosterView de React 
-        hoy = datetime.now()
-        mes = hoy.month
-        anio = hoy.year
-        num_dias = calendar.monthrange(anio, mes)[1]
+        num_dias = 7
+        week_days = [week_start + timedelta(days=i) for i in range(num_dias)]
         
         data_roster = {}
         for w in workers_sede:
@@ -500,12 +521,13 @@ elif menu == "🗓️ Cuadrante Mensual":
             data_roster[nombre_full] = [""] * num_dias
             for s in st.session_state.db['shifts']:
                 if s['worker_id'] == w['id']:
-                    d_idx = int(s['date'].split("-")[2]) - 1
-                    if d_idx < num_dias:
+                    shift_day = datetime.strptime(s['date'], '%Y-%m-%d').date()
+                    if week_start <= shift_day <= week_end:
+                        d_idx = (shift_day - week_start).days
                         data_roster[nombre_full][d_idx] = s['type']
         
         df_roster = pd.DataFrame(data_roster).T
-        df_roster.columns = [str(i+1) for i in range(num_dias)]
+        df_roster.columns = [f"{d.strftime('%a')} {d.strftime('%d/%m')}" for d in week_days]
         
         def color_roster(val):
             color = SHIFT_TYPES.get(val, {}).get('color', 'white')
@@ -513,6 +535,10 @@ elif menu == "🗓️ Cuadrante Mensual":
             return f'background-color: {color}; color: {text_color}; text-align: center; font-weight: bold'
 
         st.dataframe(df_roster.style.applymap(color_roster), use_container_width=True)
+        st.markdown("**Leyenda del cuadrante**")
+        st.markdown(
+            "L = Libre | M = Mañana | T = Tarde | N = Noche | Mr = Mañana Reducida | Tr = Tarde Reducida | V = Vacaciones | B = Baja"
+        )
 
 elif menu == "🤖 Generador IA":
     st.title("Generador Automático de Horarios")
@@ -524,9 +550,11 @@ elif menu == "🤖 Generador IA":
     if st.button("🚀 Iniciar Generación de Turnos"):
         c_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == sede_gen)
         w_ids = [w['id'] for w in st.session_state.db['workers'] if w['center_id'] == c_id]
+        week_start = get_week_start(fecha_inicio)
+        week_end = week_start + timedelta(days=6)
         
         with st.spinner("Calculando cuadrante óptimo..."):
-            nuevos_turnos = solver_automatico(w_ids, fecha_inicio)
+            nuevos_turnos = solver_automatico(w_ids, week_start)
             if nuevos_turnos:
                 fechas_nuevas = {s['date'] for s in nuevos_turnos}
                 st.session_state.db['shifts'] = [
@@ -542,11 +570,14 @@ elif menu == "🤖 Generador IA":
                 st.session_state.db['shifts'].extend(nuevos_turnos)
                 st.success(f"¡Generados {len(nuevos_turnos)} turnos con éxito!")
 
-                verif = verify_center_requirements(c_id)
+                verif = verify_center_requirements(c_id, week_start=week_start)
                 st.session_state.last_verification_by_center[c_id] = verif
                 st.session_state.db['verification_history'].append({
                     'timestamp': verif['generated_at'],
                     'center_id': c_id,
+                    'week_label': verif['week_label'],
+                    'week_start': week_start.strftime('%Y-%m-%d'),
+                    'week_end': week_end.strftime('%Y-%m-%d'),
                     'ok_checks': verif['summary']['ok_checks'],
                     'total_checks': verif['summary']['total_checks'],
                     'workers_ok': verif['summary']['workers_ok'],
@@ -555,7 +586,8 @@ elif menu == "🤖 Generador IA":
                 st.info(
                     f"Verificación automática completada: "
                     f"{verif['summary']['ok_checks']}/{verif['summary']['total_checks']} requisitos OK | "
-                    f"{verif['summary']['workers_ok']}/{verif['summary']['workers_total']} trabajadores cumplen"
+                    f"{verif['summary']['workers_ok']}/{verif['summary']['workers_total']} trabajadores cumplen | "
+                    f"Semana: {verif['week_label']} ({verif['week_start']} a {verif['week_end']})"
                 )
             else:
                 st.error("No se pudo encontrar una solución válida con el personal actual.")
@@ -566,6 +598,10 @@ elif menu == "✅ Verificación por Sede":
 
     sede_ver = st.selectbox("Sede para verificar", [c['name'] for c in st.session_state.db['centers']])
     c_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == sede_ver)
+    semana_ver = st.date_input("Semana a verificar", value=datetime.now(), key="verify_week_date")
+    week_start = get_week_start(semana_ver)
+    week_end = week_start + timedelta(days=6)
+    st.caption(f"Se verificará la semana {get_week_label(week_start)} ({week_start.strftime('%d/%m/%Y')} - {week_end.strftime('%d/%m/%Y')})")
 
     col_a, col_b = st.columns([1, 1])
     with col_a:
@@ -574,25 +610,29 @@ elif menu == "✅ Verificación por Sede":
         use_last = st.button("Cargar última verificación")
 
     if run_now:
-        verif = verify_center_requirements(c_id)
+        verif = verify_center_requirements(c_id, week_start=week_start)
         st.session_state.last_verification_by_center[c_id] = verif
         st.session_state.db['verification_history'].append({
             'timestamp': verif['generated_at'],
             'center_id': c_id,
+            'week_label': verif['week_label'],
+            'week_start': verif['week_start'],
+            'week_end': verif['week_end'],
             'ok_checks': verif['summary']['ok_checks'],
             'total_checks': verif['summary']['total_checks'],
             'workers_ok': verif['summary']['workers_ok'],
             'workers_total': verif['summary']['workers_total']
         })
 
-    verif_data = st.session_state.last_verification_by_center.get(c_id) if use_last or not run_now else st.session_state.last_verification_by_center.get(c_id)
+    verif_data = st.session_state.last_verification_by_center.get(c_id)
 
     if verif_data:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Checks OK", f"{verif_data['summary']['ok_checks']}/{verif_data['summary']['total_checks']}")
         c2.metric("Trabajadores que cumplen", f"{verif_data['summary']['workers_ok']}/{verif_data['summary']['workers_total']}")
-        c3.metric("Última ejecución", verif_data['generated_at'])
+        c3.metric("Semana verificada", verif_data['week_label'])
         c4.metric("Estado general", "OK" if verif_data['summary']['ok_checks'] == verif_data['summary']['total_checks'] else "REVISAR")
+        st.caption(f"Última ejecución: {verif_data['generated_at']} | Rango: {verif_data['week_start']} a {verif_data['week_end']}")
 
         st.subheader("Checklist de requisitos")
         st.dataframe(verif_data['checks_df'], use_container_width=True)
@@ -651,7 +691,9 @@ elif menu == "📚 Historial de Usuarios":
     if verif_rows:
         df_ver_hist = pd.DataFrame(verif_rows)
         df_ver_hist['Sede'] = sede_hist
-        st.dataframe(df_ver_hist[['timestamp', 'Sede', 'ok_checks', 'total_checks', 'workers_ok', 'workers_total']], use_container_width=True)
+        cols = ['timestamp', 'Sede', 'week_label', 'week_start', 'week_end', 'ok_checks', 'total_checks', 'workers_ok', 'workers_total']
+        cols_exist = [c for c in cols if c in df_ver_hist.columns]
+        st.dataframe(df_ver_hist[cols_exist], use_container_width=True)
     else:
         st.caption("Sin verificaciones registradas todavía para esta sede.")
 
