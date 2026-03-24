@@ -8,6 +8,34 @@ services:
       - "11434:11434"
     restart: unless-stopped
 
+  mysql:
+    image: mysql:8.0
+    container_name: miturno_mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123
+      - MYSQL_DATABASE=miturno
+      - MYSQL_USER=miturno_user
+      - MYSQL_PASSWORD=miturno_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: unless-stopped
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: miturno_phpmyadmin
+    environment:
+      - PMA_HOST=mysql
+      - PMA_PORT=3306
+      - PMA_USER=root
+      - PMA_PASSWORD=root123
+    ports:
+      - "8080:80"
+    depends_on:
+      - mysql
+    restart: unless-stopped
+
   app:
     # CORRECCIÓN: Le decimos que use el Dockerfile que está en la misma carpeta
     build: .
@@ -17,11 +45,18 @@ services:
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - PYTHONUNBUFFERED=1
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=miturno
+      - MYSQL_USER=miturno_user
+      - MYSQL_PASSWORD=miturno_pass
     # CORRECCIÓN: Hemos eliminado el 'volumes: - .:/app' y el 'command' gigante.
     # Tu Dockerfile ya se encarga de tener los archivos listos y ejecutar Streamlit.
     depends_on:
       - ollama
+      - mysql
     restart: unless-stopped
 
 volumes:
   ollama_data:
+  mysql_data:
