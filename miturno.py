@@ -111,6 +111,9 @@ if 'last_verification_by_center' not in st.session_state:
 if 'mysql_connected' not in st.session_state:
     st.session_state.mysql_connected = False
 
+if 'mysql_last_error' not in st.session_state:
+    st.session_state.mysql_last_error = ''
+
 
 def mysql_is_configured():
     return bool(os.getenv('MYSQL_HOST'))
@@ -130,6 +133,7 @@ def get_mysql_connection(use_database=True):
 
 def init_mysql_schema():
     if not mysql_is_configured():
+        st.session_state.mysql_last_error = 'MYSQL_HOST no está configurado en el entorno.'
         return False
 
     db_name = os.getenv('MYSQL_DATABASE', 'miturno')
@@ -158,9 +162,11 @@ def init_mysql_schema():
         )
         conn.commit()
         st.session_state.mysql_connected = True
+        st.session_state.mysql_last_error = ''
         return True
-    except mysql.connector.Error:
+    except mysql.connector.Error as e:
         st.session_state.mysql_connected = False
+        st.session_state.mysql_last_error = str(e)
         return False
     finally:
         if cursor:
@@ -186,8 +192,9 @@ def seed_workers_if_empty(workers_seed):
                 [(w['id'], w['name'], w['surname'], w['center_id'], w['role']) for w in workers_seed]
             )
             conn.commit()
-    except mysql.connector.Error:
+    except mysql.connector.Error as e:
         st.session_state.mysql_connected = False
+        st.session_state.mysql_last_error = str(e)
     finally:
         if cursor:
             cursor.close()
@@ -216,8 +223,9 @@ def load_workers_from_mysql():
             }
             for r in rows
         ]
-    except mysql.connector.Error:
+    except mysql.connector.Error as e:
         st.session_state.mysql_connected = False
+        st.session_state.mysql_last_error = str(e)
         return None
     finally:
         if cursor:
@@ -241,8 +249,9 @@ def insert_worker_mysql(worker):
         )
         conn.commit()
         return True
-    except mysql.connector.Error:
+    except mysql.connector.Error as e:
         st.session_state.mysql_connected = False
+        st.session_state.mysql_last_error = str(e)
         return False
     finally:
         if cursor:
@@ -260,13 +269,17 @@ def next_worker_id(workers):
     return f'w{max_n + 1}'
 
 
-if 'mysql_bootstrap_done' not in st.session_state:
-    st.session_state.mysql_bootstrap_done = True
+def ensure_mysql_ready():
+    # Reintenta conexión en cada recarga para evitar el falso "no disponible"
+    # cuando MySQL tarda un poco en iniciar.
     if init_mysql_schema():
         seed_workers_if_empty(st.session_state.db['workers'])
         workers_db = load_workers_from_mysql()
         if workers_db is not None:
             st.session_state.db['workers'] = workers_db
+
+
+ensure_mysql_ready()
 
 
 def parse_bool(value):
@@ -695,6 +708,11 @@ elif menu == "👥 Trabajadores":
         st.success("Conectado a MySQL: los trabajadores se guardan en base de datos (visible en phpMyAdmin).")
     else:
         st.warning("MySQL no disponible: se guardará en memoria temporal de la sesión.")
+        if st.button("Reintentar conexión MySQL"):
+            ensure_mysql_ready()
+            st.rerun()
+        if st.session_state.mysql_last_error:
+            st.caption(f"Detalle conexión MySQL: {st.session_state.mysql_last_error}")
 
     with st.form("new_worker"):
         col1, col2 = st.columns(2)
@@ -715,7 +733,7 @@ elif menu == "👥 Trabajadores":
             if st.session_state.mysql_connected:
                 if insert_worker_mysql(new_w):
                     workers_db = load_workers_from_mysql()
-                    if workers_db is not None:
+                    if workers_db is not None: 
                         st.session_state.db['workers'] = workers_db
                     st.success("Trabajador registrado en MySQL.")
                 else:
