@@ -1,7 +1,6 @@
 services:
   ollama:
     image: ollama/ollama
-    container_name: ollama
     volumes:
       - ollama_data:/root/.ollama
     ports:
@@ -12,7 +11,6 @@ services:
 
   mysql:
     image: mysql:8.0
-    container_name: miturno_mysql
     environment:
       - MYSQL_ROOT_PASSWORD=root123
       - MYSQL_DATABASE=miturno
@@ -34,7 +32,6 @@ services:
 
   phpmyadmin:
     image: phpmyadmin:latest
-    container_name: miturno_phpmyadmin
     environment:
       - PMA_HOST=mysql
       - PMA_PORT=3306
@@ -54,7 +51,6 @@ services:
     build:
       context: .
       dockerfile: dockerfile
-    container_name: miturno_app
     ports:
       - "8506:8505"
     environment:
