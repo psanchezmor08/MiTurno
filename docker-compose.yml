@@ -20,12 +20,6 @@ services:
       - "3310:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
     networks:
       - miturno_net
     restart: unless-stopped
@@ -40,8 +34,7 @@ services:
     ports:
       - "8082:80"
     depends_on:
-      mysql:
-        condition: service_healthy
+      - mysql
     networks:
       - miturno_net
     restart: unless-stopped
@@ -64,10 +57,8 @@ services:
     # CORRECCIÓN: Hemos eliminado el 'volumes: - .:/app' y el 'command' gigante.
     # Tu Dockerfile ya se encarga de tener los archivos listos y ejecutar Streamlit.
     depends_on:
-      ollama:
-        condition: service_started
-      mysql:
-        condition: service_healthy
+      - ollama
+      - mysql
     networks:
       - miturno_net
     restart: unless-stopped
