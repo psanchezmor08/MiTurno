@@ -31,7 +31,7 @@ services:
       - PMA_USER=root
       - PMA_PASSWORD=root123
     ports:
-      - "8080:80"
+      - "8081:80"
     depends_on:
       - mysql
     restart: unless-stopped
