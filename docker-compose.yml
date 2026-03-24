@@ -38,7 +38,9 @@ services:
 
   app:
     # CORRECCIÓN: Le decimos que use el Dockerfile que está en la misma carpeta
-    build: .
+    build:
+      context: .
+      dockerfile: dockerfile
     container_name: miturno_app
     ports:
       - "8505:8505"
