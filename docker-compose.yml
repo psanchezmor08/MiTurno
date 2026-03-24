@@ -19,7 +19,7 @@ services:
     ports:
       - "3310:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - mysql_data_v2:/var/lib/mysql
     networks:
       - miturno_net
     restart: unless-stopped
@@ -65,7 +65,7 @@ services:
 
 volumes:
   ollama_data:
-  mysql_data:
+  mysql_data_v2:
 
 networks:
   miturno_net:
