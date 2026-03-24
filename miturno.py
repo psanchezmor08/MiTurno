@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import json
 import calendar
 import os
+import unicodedata
 from collections import defaultdict
 from ortools.sat.python import cp_model
 import mysql.connector
@@ -450,15 +451,23 @@ def get_week_label(week_start):
     return f"{iso.year}-W{iso.week:02d}"
 
 
+def normalize_person_name(value):
+    if value is None:
+        return ''
+    normalized = unicodedata.normalize('NFKD', str(value))
+    normalized = ''.join(ch for ch in normalized if not unicodedata.combining(ch))
+    return ' '.join(normalized.lower().split())
+
+
 def load_example_week_shifts(center_id, week_start):
     # Patrón de ejemplo basado en el PDF compartido para visualizar horarios reales por trabajador.
     ubeda_pattern = {
-        1: {'M': ['Pilar Barragán', 'Tomás Pino'], 'T': ['Juana García', 'Francisco Pérez']},
-        2: {'M': ['Mercedes Rodríguez', 'Francisco Pérez'], 'T': ['Pilar Barragán', 'Juana García']},
-        3: {'M': ['Tomás Pino', 'Juana García'], 'T': ['Mercedes Rodríguez', 'Pilar Barragán']},
-        4: {'M': ['Francisco Pérez', 'Pilar Barragán'], 'T': ['Tomás Pino', 'Mercedes Rodríguez']},
-        5: {'M': ['Juana García', 'Mercedes Rodríguez'], 'T': ['Francisco Pérez', 'Tomás Pino']},
-        6: {'M': ['Pilar Barragán', 'Francisco Pérez'], 'T': ['Juana García', 'Tomás Pino']}
+        1: {'M': ['Juana García', 'Francisco Pérez'], 'T': ['Pilar Barragán', 'Tomás Pino']},
+        2: {'M': ['Mercedes Rodríguez', 'Francisco Pérez'], 'T': ['Pilar Barragán', 'Tomás Pino']},
+        3: {'M': ['Juana García', 'Mercedes Rodríguez'], 'T': ['Tomás Pino', 'Francisco Pérez']},
+        4: {'M': ['Pilar Barragán', 'Mercedes Rodríguez'], 'T': ['Tomás Pino', 'Juana García']},
+        5: {'M': ['Juana García', 'Tomás Pino'], 'T': ['Pilar Barragán', 'Francisco Pérez']},
+        6: {'M': ['Mercedes Rodríguez', 'Francisco Pérez'], 'T': ['Tomás Pino', 'Pilar Barragán']}
     }
 
     jaen_pattern = {
@@ -475,7 +484,10 @@ def load_example_week_shifts(center_id, week_start):
         return 0
 
     workers_center = [w for w in st.session_state.db['workers'] if w['center_id'] == center_id]
-    workers_by_name = {f"{w['name']} {w['surname']}": w['id'] for w in workers_center}
+    workers_by_name = {
+        normalize_person_name(f"{w['name']} {w['surname']}"): w['id']
+        for w in workers_center
+    }
 
     new_shifts = []
     for offset in range(7):
@@ -490,7 +502,7 @@ def load_example_week_shifts(center_id, week_start):
         day_str = day.strftime('%Y-%m-%d')
         for shift_type in ['M', 'T']:
             for worker_name in day_pattern.get(shift_type, []):
-                worker_id = workers_by_name.get(worker_name)
+                worker_id = workers_by_name.get(normalize_person_name(worker_name))
                 if worker_id:
                     new_shifts.append({'worker_id': worker_id, 'date': day_str, 'type': shift_type})
 
@@ -583,7 +595,7 @@ def verify_center_requirements(center_id, week_start=None):
         'Detalle': f"{len(min_worker_violations)} dias/turnos por debajo del minimo"
     })
 
-    # 4) Descansos semanales por trabajador (exactos)
+    # 4) Descansos semanales mínimos por trabajador
     weekly_rest_violations = 0
     required_rest_days = max(2, cfg['weekly_rest_days'])
     for worker_id, w_shifts in shifts_by_worker.items():
@@ -611,16 +623,16 @@ def verify_center_requirements(center_id, week_start=None):
                 day_shift = worked_by_day.get(curr_day, 'L')
                 if day_shift in ['L', 'V', 'B', '']:
                     rest_days += 1
-            if rest_days != required_rest_days:
+            if rest_days < required_rest_days:
                 weekly_rest_violations += 1
                 worker_issues[worker_id].append(
-                    f"Descansos semanales distintos de {required_rest_days} en semana {get_week_label(ws)}"
+                    f"Descansos semanales por debajo de {required_rest_days} en semana {get_week_label(ws)}"
                 )
 
     check_rows.append({
-        'Requisito': f"Descansos semanales exactos ({required_rest_days} dias)",
+        'Requisito': f"Descansos semanales minimos ({required_rest_days} dias)",
         'Estado': 'OK' if weekly_rest_violations == 0 else 'INCUMPLE',
-        'Detalle': f"{weekly_rest_violations} semanas-trabajador con descanso distinto al criterio"
+        'Detalle': f"{weekly_rest_violations} semanas-trabajador por debajo del minimo"
     })
 
     # 5) Descanso minimo entre jornadas
@@ -769,13 +781,23 @@ SHIFT_TYPES = {
     'B': {'name': 'Baja', 'color': '#ef4444', 'hours': 0}
 }
 
-def solver_automatico(workers_ids, start_date):
+def has_min_staff_for_required_rest(workers_count, required_per_shift, rest_days_required):
+    open_days = 6  # lunes cerrado
+    required_assignments = open_days * (required_per_shift * 2)  # M + T
+    max_assignments_with_rest = workers_count * (7 - max(0, rest_days_required))
+    return max_assignments_with_rest >= required_assignments
+
+
+def solver_automatico(workers_ids, start_date, center_id=None):
     model = cp_model.CpModel()
     num_days = 7
-    # 0=L, 1=M, 2=T, 3=N (Simplificado para el ejemplo)
-    shifts = [0, 1, 2, 3]
-    map_ids = {0: 'L', 1: 'M', 2: 'T', 3: 'N'}
-    
+    # 0=L, 1=M, 2=T
+    shifts = [0, 1, 2]
+    map_ids = {0: 'L', 1: 'M', 2: 'T'}
+    cfg = get_requirements_config()
+    weekly_min_workers = build_weekly_min_workers_map(center_id) if center_id else {}
+    required_rest_days = max(0, cfg['weekly_rest_days'])
+
     x = {}
     for w in workers_ids:
         for d in range(num_days):
@@ -789,14 +811,38 @@ def solver_automatico(workers_ids, start_date):
         # Lunes cerrado para todos: obligatorio libre.
         model.Add(x[w, 0, 0] == 1)
 
-        # Regla: No Tarde(2) o Noche(3) antes de Mañana(1) 
+        # Regla de descanso: no Tarde antes de Mañana al día siguiente.
         for d in range(num_days - 1):
-            model.AddImplication(x[w, d, 2], x[w, d+1, 1].Not())
-            model.AddImplication(x[w, d, 3], x[w, d+1, 1].Not())
-        # Descanso semanal exacto: 2 días libres.
-        model.Add(sum(x[w, d, 0] for d in range(num_days)) == 2)
+            model.AddImplication(x[w, d, 2], x[w, d + 1, 1].Not())
+
+        # Descanso semanal mínimo.
+        model.Add(sum(x[w, d, 0] for d in range(num_days)) >= required_rest_days)
+
+        # Rotación M/T para quienes trabajan 4+ días.
+        work_days = model.NewIntVar(0, num_days, f'work_days_{w}')
+        model.Add(work_days == sum(x[w, d, 1] + x[w, d, 2] for d in range(num_days)))
+        has_m = model.NewBoolVar(f'has_m_{w}')
+        has_t = model.NewBoolVar(f'has_t_{w}')
+        model.Add(sum(x[w, d, 1] for d in range(num_days)) >= 1).OnlyEnforceIf(has_m)
+        model.Add(sum(x[w, d, 1] for d in range(num_days)) == 0).OnlyEnforceIf(has_m.Not())
+        model.Add(sum(x[w, d, 2] for d in range(num_days)) >= 1).OnlyEnforceIf(has_t)
+        model.Add(sum(x[w, d, 2] for d in range(num_days)) == 0).OnlyEnforceIf(has_t.Not())
+        works_enough = model.NewBoolVar(f'works_enough_{w}')
+        model.Add(work_days >= 4).OnlyEnforceIf(works_enough)
+        model.Add(work_days <= 3).OnlyEnforceIf(works_enough.Not())
+        model.Add(has_m == 1).OnlyEnforceIf(works_enough)
+        model.Add(has_t == 1).OnlyEnforceIf(works_enough)
+
+    # Cobertura mínima por turno en días abiertos (martes-domingo).
+    for d in range(1, num_days):
+        day = start_date + timedelta(days=d)
+        week_key = f"{day.isocalendar().year}-W{day.isocalendar().week:02d}"
+        required = weekly_min_workers.get(week_key, cfg['min_workers_per_shift'])
+        model.Add(sum(x[w, d, 1] for w in workers_ids) >= required)
+        model.Add(sum(x[w, d, 2] for w in workers_ids) >= required)
 
     solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10
     if solver.Solve(model) in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         new_shifts = []
         for d in range(num_days):
@@ -983,7 +1029,14 @@ elif menu == "🗓️ Cuadrante Semanal":
     if st.button("📄 Cargar horarios de ejemplo (PDF) para esta semana"):
         total_loaded = load_example_week_shifts(c_id, week_start)
         if total_loaded > 0:
+            verif_example = verify_center_requirements(c_id, week_start=week_start)
+            st.session_state.last_verification_by_center[c_id] = verif_example
             st.success(f"Se cargaron {total_loaded} turnos de ejemplo para la semana {get_week_label(week_start)}.")
+            if verif_example['summary']['ok_checks'] < verif_example['summary']['total_checks']:
+                st.warning(
+                    "El ejemplo cargado no cumple todos los requisitos. "
+                    "Usa el Generador IA para cuadrante normativo."
+                )
             st.rerun()
         else:
             st.info("No se encontraron trabajadores de ejemplo para esta sede.")
@@ -1034,9 +1087,21 @@ elif menu == "🤖 Generador IA":
         w_ids = [w['id'] for w in st.session_state.db['workers'] if w['center_id'] == c_id]
         week_start = get_week_start(fecha_inicio)
         week_end = week_start + timedelta(days=6)
+        cfg = get_requirements_config()
+        weekly_min_workers = build_weekly_min_workers_map(c_id)
+        week_key = get_week_label(week_start)
+        required = weekly_min_workers.get(week_key, cfg['min_workers_per_shift'])
+
+        if not has_min_staff_for_required_rest(len(w_ids), required, max(0, cfg['weekly_rest_days'])):
+            st.error(
+                "No hay plantilla suficiente para cumplir simultáneamente "
+                f"minimo de {required} por turno y {cfg['weekly_rest_days']} descansos/semana. "
+                "Ajusta requisitos semanales o aumenta personal."
+            )
+            st.stop()
         
         with st.spinner("Calculando cuadrante óptimo..."):
-            nuevos_turnos = solver_automatico(w_ids, week_start)
+            nuevos_turnos = solver_automatico(w_ids, week_start, center_id=c_id)
             if nuevos_turnos:
                 fechas_nuevas = {s['date'] for s in nuevos_turnos}
                 st.session_state.db['shifts'] = [
@@ -1247,3 +1312,4 @@ elif menu == "⚙️ Requisitos":
         st.dataframe(pd.DataFrame(weekly_rows), use_container_width=True)
     else:
         st.caption('No hay requisitos semanales definidos todavía.')
+
