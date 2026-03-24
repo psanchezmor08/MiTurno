@@ -3,8 +3,10 @@ import pandas as pd
 from datetime import datetime, timedelta
 import json
 import calendar
+import os
 from collections import defaultdict
 from ortools.sat.python import cp_model
+import mysql.connector
 
 # --- 1. CONFIGURACIÓN Y ESTILOS (ADA/PEMA) ---
 st.set_page_config(page_title="MiTurno - Gestión de Centros ADA", layout="wide", page_icon="🗓️")
@@ -105,6 +107,166 @@ if 'db' not in st.session_state:
 
 if 'last_verification_by_center' not in st.session_state:
     st.session_state.last_verification_by_center = {}
+
+if 'mysql_connected' not in st.session_state:
+    st.session_state.mysql_connected = False
+
+
+def mysql_is_configured():
+    return bool(os.getenv('MYSQL_HOST'))
+
+
+def get_mysql_connection(use_database=True):
+    conn_kwargs = {
+        'host': os.getenv('MYSQL_HOST', 'localhost'),
+        'port': int(os.getenv('MYSQL_PORT', '3306')),
+        'user': os.getenv('MYSQL_USER', 'root'),
+        'password': os.getenv('MYSQL_PASSWORD', '')
+    }
+    if use_database:
+        conn_kwargs['database'] = os.getenv('MYSQL_DATABASE', 'miturno')
+    return mysql.connector.connect(**conn_kwargs)
+
+
+def init_mysql_schema():
+    if not mysql_is_configured():
+        return False
+
+    db_name = os.getenv('MYSQL_DATABASE', 'miturno')
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection(use_database=False)
+        cursor = conn.cursor()
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+        cursor.close()
+        conn.close()
+
+        conn = get_mysql_connection(use_database=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workers (
+                id VARCHAR(40) PRIMARY KEY,
+                name VARCHAR(120) NOT NULL,
+                surname VARCHAR(120) NOT NULL,
+                center_id VARCHAR(20) NOT NULL,
+                role VARCHAR(30) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.commit()
+        st.session_state.mysql_connected = True
+        return True
+    except mysql.connector.Error:
+        st.session_state.mysql_connected = False
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def seed_workers_if_empty(workers_seed):
+    if not st.session_state.mysql_connected:
+        return
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection(use_database=True)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM workers")
+        count = cursor.fetchone()[0]
+        if count == 0:
+            cursor.executemany(
+                "INSERT INTO workers (id, name, surname, center_id, role) VALUES (%s, %s, %s, %s, %s)",
+                [(w['id'], w['name'], w['surname'], w['center_id'], w['role']) for w in workers_seed]
+            )
+            conn.commit()
+    except mysql.connector.Error:
+        st.session_state.mysql_connected = False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def load_workers_from_mysql():
+    if not st.session_state.mysql_connected:
+        return None
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection(use_database=True)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT id, name, surname, center_id, role FROM workers ORDER BY id")
+        rows = cursor.fetchall()
+        return [
+            {
+                'id': r['id'],
+                'name': r['name'],
+                'surname': r['surname'],
+                'center_id': r['center_id'],
+                'role': r['role']
+            }
+            for r in rows
+        ]
+    except mysql.connector.Error:
+        st.session_state.mysql_connected = False
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def insert_worker_mysql(worker):
+    if not st.session_state.mysql_connected:
+        return False
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection(use_database=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO workers (id, name, surname, center_id, role) VALUES (%s, %s, %s, %s, %s)",
+            (worker['id'], worker['name'], worker['surname'], worker['center_id'], worker['role'])
+        )
+        conn.commit()
+        return True
+    except mysql.connector.Error:
+        st.session_state.mysql_connected = False
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def next_worker_id(workers):
+    max_n = 0
+    for w in workers:
+        wid = str(w.get('id', ''))
+        if wid.startswith('w') and wid[1:].isdigit():
+            max_n = max(max_n, int(wid[1:]))
+    return f'w{max_n + 1}'
+
+
+if 'mysql_bootstrap_done' not in st.session_state:
+    st.session_state.mysql_bootstrap_done = True
+    if init_mysql_schema():
+        seed_workers_if_empty(st.session_state.db['workers'])
+        workers_db = load_workers_from_mysql()
+        if workers_db is not None:
+            st.session_state.db['workers'] = workers_db
 
 
 def parse_bool(value):
@@ -529,6 +691,11 @@ elif menu == "🏢 Sedes":
 
 elif menu == "👥 Trabajadores":
     st.title("Personal de Centros")
+    if st.session_state.mysql_connected:
+        st.success("Conectado a MySQL: los trabajadores se guardan en base de datos (visible en phpMyAdmin).")
+    else:
+        st.warning("MySQL no disponible: se guardará en memoria temporal de la sesión.")
+
     with st.form("new_worker"):
         col1, col2 = st.columns(2)
         name = col1.text_input("Nombre")
@@ -537,9 +704,25 @@ elif menu == "👥 Trabajadores":
         role = st.selectbox("Rol", ["WORKER", "EDITOR", "ADMIN"])
         if st.form_submit_button("Registrar Trabajador"):
             c_id = next(c['id'] for c in st.session_state.db['centers'] if c['name'] == center)
-            new_w = {'id': f'w{len(st.session_state.db["workers"])+1}', 'name': name, 'surname': surname, 'center_id': c_id, 'role': role}
-            st.session_state.db['workers'].append(new_w)
-            st.success("Trabajador registrado.")
+            new_w = {
+                'id': next_worker_id(st.session_state.db['workers']),
+                'name': name,
+                'surname': surname,
+                'center_id': c_id,
+                'role': role
+            }
+
+            if st.session_state.mysql_connected:
+                if insert_worker_mysql(new_w):
+                    workers_db = load_workers_from_mysql()
+                    if workers_db is not None:
+                        st.session_state.db['workers'] = workers_db
+                    st.success("Trabajador registrado en MySQL.")
+                else:
+                    st.error("No se pudo guardar en MySQL. Revisa la conexión.")
+            else:
+                st.session_state.db['workers'].append(new_w)
+                st.success("Trabajador registrado en sesión local.")
             
     st.write("### Plantilla")
     st.dataframe(pd.DataFrame(st.session_state.db['workers']), use_container_width=True)
