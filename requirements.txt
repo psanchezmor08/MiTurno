@@ -3,3 +3,4 @@ pandas
 langchain_community
 requests
 ortools
+mysql-connector-python
